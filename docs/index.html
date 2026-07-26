@@ -193,26 +193,34 @@ res.z, res.rho                             # the density profile</code></pre>
 
     <div class="scroll">
     <table>
-      <tr><th>Case</th><th>Reference</th><th>Reference accuracy</th><th>Measured</th></tr>
+      <tr><th>Case</th><th>Reference</th><th>Reference accuracy</th><th>Measured rel. error</th><th>split R-hat</th></tr>
       <tr><td>d = 1 bulk, &eta; = 0.5</td><td>Tonks and Percus</td>
-          <td class="exact">exact</td><td class="num">VAL_D1</td></tr>
+          <td class="exact">exact</td><td class="num">0.0021</td><td class="num">1.001</td></tr>
       <tr><td>d = 2 bulk, &eta; = 0.4</td><td>Henderson</td>
-          <td>0.1%</td><td class="num">VAL_D2</td></tr>
+          <td>0.1%</td><td class="num">0.0005</td><td class="num">1.002</td></tr>
       <tr><td>d = 3 bulk, &eta; = 0.3</td><td>Carnahan and Starling</td>
-          <td>0.1%</td><td class="num">VAL_D3</td></tr>
-      <tr><td>d = 1 wall contact</td><td>&rho;(0+) = &beta;P, exact Tonks</td>
-          <td class="exact">exact</td><td class="num">VAL_CONTACT</td></tr>
+          <td>0.1%</td><td class="num">0.0019</td><td class="num">1.014</td></tr>
+      <tr><td>d = 1 wall contact, &eta; = 0.5</td><td>&rho;(0+) = &beta;P, exact Tonks</td>
+          <td class="exact">exact</td><td class="num">0.0435</td><td class="num">1.000</td></tr>
     </table>
     </div>
 
-    <p>Every case asserts split R-hat alongside the density, which is not
-    decoration. On the first full run the three-dimensional case matched the
-    equation of state to a tenth of a percent while its chains had not mixed at
+    <p class="eyebrow" style="margin-top:-.4rem">Measured on one GPU, 26 July 2026,
+    reproduced by <code>scripts/validate.py --markdown</code></p>
+
+    <p>Every case asserts split R-hat alongside the density, and that is not
+    decoration. On the first full run the three-dimensional case matched
+    Carnahan-Starling to a tenth of a percent while its chains had not mixed at
     all, at R-hat 1.23: started empty at an insertion acceptance near one
-    percent, they spent the entire burn-in filling. The mean was right for the
-    wrong reason, and only the mixing statistic noticed. Seating ninety percent
-    of the target occupancy on a lattice and melting it in the burn removes the
-    transient.</p>
+    percent, they had spent the entire burn-in filling. The mean was right for
+    the wrong reason, and only the mixing statistic noticed. Two changes fixed
+    it. Ninety percent of the target occupancy is now seated on a lattice and
+    melted in the burn, and each chain gets its own shuffle of that lattice
+    rather than a shared one, since chains launched from identical
+    configurations start with zero between-chain variance and make R-hat report
+    agreement the sampler has not earned. The three-dimensional case then needed
+    32 chains and two million steps to clear the gate honestly, which is ten
+    times the cost of the other three and worth paying.</p>
 
     <p>Alongside the statistics, 102 fast tests pin the invariants that catch
     sampler bugs rather than confirm sampler statistics. No two live centres

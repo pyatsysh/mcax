@@ -122,12 +122,21 @@ In two and three dimensions the best references available are accurate to about
 0.1%, so a marginal disagreement there is ambiguous between our bug and the
 reference equation. In one dimension it is a bug.
 
-| Case | Reference | Reference accuracy | Measured rel. error |
-|---|---|---|---|
-| d = 1 bulk, eta = 0.5 | Tonks and Percus | **exact** | VAL_D1 |
-| d = 2 bulk, eta = 0.4 | Henderson | 0.1% | VAL_D2 |
-| d = 3 bulk, eta = 0.3 | Carnahan and Starling | 0.1% | VAL_D3 |
-| d = 1 slit contact, eta = 0.5 | rho(0+) = beta P, exact Tonks | **exact** | VAL_CONTACT |
+| Case | Reference | Reference accuracy | Measured rel. error | split R-hat |
+|---|---|---|---|---|
+| d = 1 bulk, eta = 0.5 | Tonks and Percus | **exact** | 0.0021 | 1.001 |
+| d = 2 bulk, eta = 0.4 | Henderson | 0.1% | 0.0005 | 1.002 |
+| d = 3 bulk, eta = 0.3 | Carnahan and Starling | 0.1% | 0.0019 | 1.014 |
+| d = 1 slit contact, eta = 0.5 | rho(0+) = beta P, exact Tonks | **exact** | 0.0435 | 1.000 |
+
+Measured on one GPU, 2026-07-26, reproduced by `scripts/validate.py --markdown`.
+The bulk cases use 16 chains and 2e5 steps, except d = 3 which needs 32 chains
+and 2e6 to clear the mixing gate. The contact case extrapolates a quadratic
+through the first three bins after mirror-averaging the two walls, and that
+extrapolation amplifies bin noise to about 0.03 in absolute terms, so its gate
+sits near four sigma rather than at the 5% a reader might expect: at this
+statistics a 5% gate was a 43% chance of a spurious failure, and a gate that
+false-fails on a coin flip trains everybody to ignore it.
 
 Every case asserts split R-hat as well as the density, which is not decoration.
 On the first full run the three-dimensional case matched Carnahan-Starling to
