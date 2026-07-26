@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mcax: hard-particle Monte Carlo in JAX</title>
+<meta name="description" content="Batched hard-particle grand-canonical Monte Carlo in JAX. Many independent chains in lockstep on one device, exact muVT acceptances, validated against Tonks, Henderson and Carnahan-Starling.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredericka+the+Great&family=Crimson+Text:ital,wght@0,400;0,600;1,400&family=Headland+One&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --field:#ECEFF4; --chrome:#5E81AC; --accent:#BF616A; --ink:#2E3440;
+  --code:#E5E9F0; --muted:#4C566A; --card:#FFFFFF; --fig:#2E3440;
+  --rule:#D8DEE9;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--field); color:var(--ink);
+  font-family:"Crimson Text",Georgia,serif; font-size:19px; line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.bar{background:var(--chrome); color:#fff}
+.bar .in{max-width:1080px; margin:0 auto; padding:.72rem 1.4rem;
+  display:flex; align-items:center; gap:1.4rem}
+.bar a{color:#fff; text-decoration:none; font-family:"Headland One",serif;
+  font-size:.94rem}
+.bar a:hover{color:var(--ink)}
+.bar .mark{font-family:"Fredericka the Great",cursive; font-size:1.35rem;
+  margin-right:auto; letter-spacing:.5px}
+.wrap{max-width:1080px; margin:0 auto; padding:0 1.4rem}
+.card{background:var(--card); border-radius:2px;
+  box-shadow:0 1px 4px rgba(46,52,64,.18); padding:2.2rem 2.4rem;
+  margin:1.6rem 0}
+h1,h2,h3{font-family:"Fredericka the Great",cursive; font-weight:400;
+  line-height:1.24; letter-spacing:.4px}
+h2{font-size:2.05rem; margin:0 0 1rem}
+h3{font-size:1.42rem; margin:1.8rem 0 .5rem}
+p{margin:0 0 1rem}
+a{color:var(--accent)}
+.eyebrow{font-family:"Headland One",serif; font-variant:small-caps;
+  letter-spacing:.14em; font-size:.83rem; color:var(--muted); margin:0 0 .6rem}
+.hero{display:grid; grid-template-columns:1.05fr .95fr; gap:2.4rem;
+  align-items:center; padding-top:2.6rem}
+.hero h1{font-size:4.6rem; margin:0 0 .6rem}
+.hero h1 .pay{color:var(--accent)}
+.tagline{font-style:italic; font-size:1.16rem; color:var(--ink); margin:0 0 1.5rem}
+.btns{display:flex; gap:.8rem; flex-wrap:wrap}
+.btn{display:inline-block; padding:.5rem 1.25rem; border-radius:2px;
+  text-decoration:none; font-family:"Headland One",serif; font-size:.95rem;
+  border:1.5px solid var(--chrome)}
+.btn.solid{background:var(--chrome); color:#fff}
+.btn.solid:hover{background:#4C6E96}
+.btn.out{background:transparent; color:var(--chrome)}
+.btn.out:hover{background:rgba(94,129,172,.1)}
+figure{margin:0}
+figure img{width:100%; background:var(--fig); border-radius:2px; display:block}
+figcaption{font-style:italic; font-size:.8rem; color:var(--muted); margin-top:.45rem}
+pre{background:var(--code); border-radius:2px; padding:1rem 1.1rem;
+  overflow-x:auto; margin:0 0 1rem}
+code{font-family:"Roboto Mono",monospace; font-size:.82rem; color:var(--ink)}
+p code,li code,td code{background:var(--code); padding:.08em .34em; border-radius:2px}
+table{border-collapse:collapse; width:100%; font-size:.93rem; margin:0 0 1rem}
+th,td{text-align:left; padding:.5rem .7rem; border-bottom:1px solid var(--rule)}
+th{font-family:"Headland One",serif; font-weight:400; font-size:.86rem;
+  color:var(--muted)}
+td.num{font-family:"Roboto Mono",monospace; font-size:.82rem}
+.exact{color:var(--accent)}
+ul{margin:0 0 1rem; padding-left:1.2rem}
+li{margin:.3rem 0}
+.lede{font-size:1.06rem}
+.scroll{overflow-x:auto}
+footer{padding:2rem 1.4rem 3rem; text-align:center; color:var(--muted);
+  font-size:.88rem}
+footer a{color:var(--muted)}
+@media (max-width:820px){
+  .hero{grid-template-columns:1fr; padding-top:1.6rem}
+  .hero h1{font-size:3.4rem}
+  .card{padding:1.5rem 1.3rem}
+  body{font-size:18px}
+}
+</style>
+</head>
+<body>
+
+<div class="bar"><div class="in">
+  <span class="mark">mcax</span>
+  <a href="#why">Why JAX</a>
+  <a href="#validation">Validation</a>
+  <a href="#limits">Limits</a>
+  <a href="https://github.com/pyatsysh/mcax">GitHub</a>
+</div></div>
+
+<div class="wrap">
+
+  <div class="hero">
+    <div>
+      <p class="eyebrow">A JAX library &middot; v0.1.0 &middot; Apache-2.0</p>
+      <h1>mc<span class="pay">ax</span></h1>
+      <p class="tagline">mcax puts hard-particle Monte Carlo inside JAX. One
+      compiled call advances sixty-four independent chains at once, the
+      grand-canonical acceptances are exact rather than approximated, and the
+      one-dimensional case is checked against a closed form instead of against
+      another simulation.</p>
+      <div class="btns">
+        <a class="btn solid" href="https://github.com/pyatsysh/mcax">Get the code</a>
+        <a class="btn out" href="#validation">Read the validation</a>
+      </div>
+    </div>
+    <figure>
+      <img src="wall_profile.png" alt="Density profile of hard rods in a slit, compared with the exact Tonks contact value">
+      <figcaption>Hard rods at a hard wall, 48 chains: the measured contact
+      density against the exact sum rule.</figcaption>
+    </figure>
+  </div>
+
+  <div class="card" id="why">
+    <h2>Why an accelerator changes Monte Carlo</h2>
+    <p class="lede">A Markov chain cannot be parallelised inside itself. Step
+    <code>n+1</code> depends on step <code>n</code>, and no amount of hardware
+    changes that. This is the reason Monte Carlo has spent twenty years
+    watching molecular dynamics move onto GPUs without following it.</p>
+
+    <p>There is a second axis, and it has been there the whole time. Chains are
+    independent of one another, so a device can carry many of them at once. The
+    state becomes an array with a leading chain index, one <code>vmap</code>
+    advances the whole batch, and the sequential dependence stays where it
+    belongs: along an axis nobody was trying to parallelise anyway.</p>
+
+    <p>Two things follow that are worth more than the speed. Chain-to-chain
+    scatter is an honest independent-replica error bar, so the usual estimate of
+    an autocorrelation time before a number can be quoted is not needed for the
+    between-chain part. And because the chains really are independent, adding
+    chains buys effective sample size linearly, where extra draws down one chain
+    buy nothing until that chain has mixed.</p>
+
+    <p>The compilation matters separately from the device. A Monte Carlo loop
+    written in NumPy spends on the order of a microsecond per step inside the
+    interpreter, which for a few hundred particles is more than the arithmetic
+    costs. Wrapping the sweep in <code>jit</code> and <code>scan</code> removes
+    that, and it removes it on a laptop as well as on a GPU.</p>
+  </div>
+
+  <div class="card">
+    <h2>What is on offer today</h2>
+    <p>Three routes exist for hard-particle Monte Carlo, and each gives up
+    something specific.</p>
+    <ul>
+      <li><b>jax-md</b> is JAX-native and excellent, but it is built for soft
+      potentials, and its Monte Carlo is the hybrid swap kind aimed at glassy
+      systems. Hard cores in the grand canonical ensemble are not its
+      ensemble.</li>
+      <li><b>HOOMD-blue HPMC</b> is the reference implementation of
+      hard-particle Monte Carlo, faster per chain than anything here, and a
+      CUDA and C++ codebase. It cannot be called from inside a training
+      loop.</li>
+      <li><b>Writing your own</b> takes an afternoon for the sampler and a
+      month for the validation. The sampler is three acceptance ratios; knowing
+      that they are right is the actual work.</li>
+    </ul>
+    <p>mcax occupies the gap those three leave: hard cores, grand canonical,
+    JAX-native, and validated against closed forms. It is one file of physics
+    with no energies in it at all, because for hard particles the Boltzmann
+    factor is an indicator function and the whole model is an overlap test plus
+    three exact acceptances.</p>
+
+<pre><code>import jax; jax.config.update("jax_enable_x64", True)
+from mcax import make_spec, burn_and_sample, summary, eos
+
+rho_b = 0.3 / eos.B[3]                     # hard spheres at eta = 0.3
+spec  = make_spec(d = 3, H = 8.0, Lperp = 10.0, slit = True,
+                  z_act = float(eos.z_of_rho(3, rho_b)))
+
+res = burn_and_sample(spec, C = 64, seed = 0, n_burn = 200_000,
+                      n_run = 1_000_000, thin = 500, nbins = 160)
+
+print(summary(res.Ns))                     # ESS, split R-hat
+assert res.capacity_warning is None
+res.z, res.rho                             # the density profile</code></pre>
+  </div>
+
+  <div class="card" id="validation">
+    <h2>How far the numbers can be trusted</h2>
+    <p>The one-dimensional case is kept deliberately, and it is the reason to
+    believe the other two. For hard rods, Tonks and Percus solved everything in
+    closed form: the equation of state, the pressure, and the profile at a hard
+    wall. A detailed-balance error, a factor of the volume in the wrong place,
+    or a slip in the alive-mask fails there against an exact number rather than
+    against another simulation carrying its own errors. In two and three
+    dimensions the best references available are accurate to about a tenth of a
+    percent, so a marginal disagreement is ambiguous. In one dimension it is a
+    bug.</p>
+
+    <div class="scroll">
+    <table>
+      <tr><th>Case</th><th>Reference</th><th>Reference accuracy</th><th>Measured</th></tr>
+      <tr><td>d = 1 bulk, &eta; = 0.5</td><td>Tonks and Percus</td>
+          <td class="exact">exact</td><td class="num">VAL_D1</td></tr>
+      <tr><td>d = 2 bulk, &eta; = 0.4</td><td>Henderson</td>
+          <td>0.1%</td><td class="num">VAL_D2</td></tr>
+      <tr><td>d = 3 bulk, &eta; = 0.3</td><td>Carnahan and Starling</td>
+          <td>0.1%</td><td class="num">VAL_D3</td></tr>
+      <tr><td>d = 1 wall contact</td><td>&rho;(0+) = &beta;P, exact Tonks</td>
+          <td class="exact">exact</td><td class="num">VAL_CONTACT</td></tr>
+    </table>
+    </div>
+
+    <p>Every case asserts split R-hat alongside the density, which is not
+    decoration. On the first full run the three-dimensional case matched the
+    equation of state to a tenth of a percent while its chains had not mixed at
+    all, at R-hat 1.23: started empty at an insertion acceptance near one
+    percent, they spent the entire burn-in filling. The mean was right for the
+    wrong reason, and only the mixing statistic noticed. Seating ninety percent
+    of the target occupancy on a lattice and melting it in the burn removes the
+    transient.</p>
+
+    <p>Alongside the statistics, 102 fast tests pin the invariants that catch
+    sampler bugs rather than confirm sampler statistics. No two live centres
+    closer than one diameter, verified with a separate NumPy implementation of
+    the boundary conventions so a geometry error cannot hide behind itself. The
+    ideal-gas limit at vanishing core size, which tests the acceptances with the
+    overlap test removed from the picture entirely. Accepted insertions
+    balancing accepted deletions at equilibrium. Bit-exact reproduction from a
+    seed. They run in 103 seconds on a laptop CPU.</p>
+  </div>
+
+  <div class="card" id="limits">
+    <h2>What it will not do</h2>
+    <p>Being written in JAX does not make this differentiable, and that is worth
+    saying before anything else, because the inference is natural and it is
+    wrong. Acceptance is a discrete accept or reject against a uniform draw. The
+    hard-core log-density is an indicator function with no gradient anywhere.
+    The grand-canonical state space is trans-dimensional, since the particle
+    number itself moves. A gradient of the profile with respect to the chemical
+    potential is not unimplemented here, it is undefined by this route.
+    Response functions come from fluctuation identities instead, where the
+    derivative with respect to <code>beta mu</code> is a sampled covariance, and
+    that is the supported answer.</p>
+    <ul>
+      <li><b>Fixed capacity.</b> A chain holds at most <code>Nmax</code>
+      particles, and an insertion into a full chain is rejected. That is not a
+      Metropolis rejection: it truncates the ensemble and breaks detailed
+      balance. Nothing in a density profile would reveal it, so every result
+      carries a saturation figure and a warning that fires at 95 percent.</li>
+      <li><b>The overlap test is O(N).</b> Each trial move is tested against
+      every live particle, with no cell list. Comfortable to a few hundred
+      particles per chain, and the first thing that has to change for large
+      boxes.</li>
+      <li><b>Per-chain speed is not competitive.</b> Three move branches are
+      computed every step and two are thrown away, which keeps the batch free of
+      divergence at the cost of roughly three times the arithmetic. A good
+      single-chain C code beats it. The win is in the batch and in living inside
+      JAX, and pretending otherwise would only disappoint the people who need
+      HPMC.</li>
+      <li><b>Single-component spheres.</b> No mixtures, no aspherical shapes, no
+      external field beyond the hard walls.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Where this is going</h2>
+    <p>The reason to want hard-particle Monte Carlo inside JAX rather than
+    beside it is that the consumers are already there. Density-functional
+    models, the training loops that fit them, and the solvers underneath are
+    JAX code, and a sampler written in the same framework composes with them
+    instead of exporting to them.</p>
+    <p>Ultimately that is what the library is for: grand-canonical ground truth
+    generated inside a training loop rather than shipped to it as a frozen
+    dataset, so the reference data can follow the model into whatever corner of
+    the phase diagram the model wanders into.</p>
+    <div class="btns">
+      <a class="btn solid" href="https://github.com/pyatsysh/mcax">Get the code</a>
+    </div>
+  </div>
+
+</div>
+
+<footer>
+  &copy; Peter Yatsyshin &middot;
+  <a href="https://yatsyshin.com">yatsyshin.com</a> &middot;
+  <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache-2.0</a>
+</footer>
+
+</body>
+</html>
