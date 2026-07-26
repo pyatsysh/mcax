@@ -1,0 +1,49 @@
+[project]
+name = "mcax"
+dynamic = ["version"]
+description = "Batched hard-particle grand-canonical Monte Carlo in JAX: hard rods, discs and spheres in bulk and slit confinement, many independent chains advanced in lockstep on one device, everything jit/scan-compiled. Exact muVT acceptances, no energies, validated against Tonks/Percus, Henderson and Carnahan-Starling."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [{name = "Peter Yatsyshin"}]
+keywords = ["monte-carlo", "grand-canonical", "hard-spheres", "statistical-mechanics", "jax", "molecular-simulation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=2.0",
+    "jax>=0.4",
+]
+
+[project.optional-dependencies]
+examples = ["matplotlib>=3.7"]          # figures for examples/
+test = ["pytest>=7"]
+dev = ["matplotlib>=3.7", "pytest>=7"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "mcax.__version__"}     # single source of truth: mcax/__init__.py
+
+[tool.setuptools.packages.find]
+include = ["mcax*"]
+
+[tool.setuptools.package-data]
+mcax = ["py.typed"]
+
+[tool.pytest.ini_options]
+# The slow tier is deselected by default so that a bare `pytest` is a usable
+# pre-commit gate. Opt in with `pytest -m slow` (a command-line -m overrides
+# this one), or `-m ""` for everything.
+addopts = "-q -m 'not slow'"
+testpaths = ["tests"]
+markers = [
+    "slow: full physics validation against the equations of state: minutes to tens of minutes per case",
+]
