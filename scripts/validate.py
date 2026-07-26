@@ -32,7 +32,7 @@ def f_ex(d, rho):
     if d == 2:
         x = np.linspace(1e-9, eta, 4000)
         zx = (1.0 + x ** 2 / 8.0) / (1.0 - x) ** 2
-        return rho * np.trapz((zx - 1.0) / x, x)
+        return rho * np.trapezoid((zx - 1.0) / x, x)
     return rho * (4.0 * eta - 3.0 * eta ** 2) / (1.0 - eta) ** 2
 
 
