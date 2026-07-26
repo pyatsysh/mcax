@@ -62,11 +62,36 @@ class MCState(NamedTuple):
     tot: jnp.ndarray       # (C, 3) attempted moves per type
 
 
-def init_state(spec: MCSpec, C: int, seed: int = 0) -> MCState:
+def lattice_fill(spec: MCSpec, n0: int, seed: int = 0) -> np.ndarray:
+    """(<= n0, d) non-overlapping cubic-lattice sites inside the box. Chains
+    started empty must FILL grand-canonically one accepted insertion at a time
+    — for dense states the fill time rivals the burn-in and biases everything
+    sampled before it completes (reviewed finding). Seating ~90% of the target
+    N on a lattice and melting it in the burn removes the transient."""
+    a = 1.05 * spec.sigma
+    zs = np.arange(0.5 * a, spec.H - 0.01, a)
+    per = [np.arange(0.5 * a, spec.Lperp - 0.49 * a, a)
+           for _ in range(spec.d - 1)]
+    grids = np.meshgrid(*(per + [zs]), indexing="ij")
+    sites = np.stack([g.ravel() for g in grids], axis=-1)
+    rng = np.random.default_rng(seed)
+    rng.shuffle(sites)
+    return sites[:min(n0, len(sites))]
+
+
+def init_state(spec: MCSpec, C: int, seed: int = 0, n0: int = 0) -> MCState:
+    """``n0 > 0`` seats that many particles on a melt-in lattice (all chains
+    share the start; different keys decorrelate them during burn-in)."""
     keys = jax.random.split(jax.random.PRNGKey(seed), C)
+    pos = jnp.zeros((C, spec.Nmax, spec.d))
+    alive = jnp.zeros((C, spec.Nmax), dtype=bool)
+    if n0 > 0:
+        sites = lattice_fill(spec, n0, seed)
+        pos = pos.at[:, :len(sites)].set(jnp.asarray(sites)[None])
+        alive = alive.at[:, :len(sites)].set(True)
     return MCState(
-        pos=jnp.zeros((C, spec.Nmax, spec.d)),
-        alive=jnp.zeros((C, spec.Nmax), dtype=bool),
+        pos=pos,
+        alive=alive,
         key=keys,
         acc=jnp.zeros((C, 3), dtype=jnp.int64),
         tot=jnp.zeros((C, 3), dtype=jnp.int64),
@@ -209,9 +234,11 @@ def density_profile(spec: MCSpec, hist: np.ndarray, nsamples: int):
 
 
 def burn_and_sample(spec: MCSpec, C: int, seed: int, n_burn: int, n_run: int,
-                    thin: int, nbins: int):
-    """Convenience: burn-in, then sample. Returns (z, rho, Ns, acc_rates)."""
-    st = init_state(spec, C, seed)
+                    thin: int, nbins: int, n0: int = 0):
+    """Convenience: burn-in, then sample. Returns (z, rho, Ns, acc_rates).
+    ``n0``: lattice-prefill count (see ``lattice_fill``); keep the returned
+    ``Ns`` (C, nchunks) series — its drift is the equilibration diagnostic."""
+    st = init_state(spec, C, seed, n0=n0)
     st, _, _ = run(spec, st, n_burn, max(n_burn // 4, 1), nbins)
     st = st._replace(acc=jnp.zeros_like(st.acc), tot=jnp.zeros_like(st.tot))
     st, hist, Ns = run(spec, st, n_run, thin, nbins)

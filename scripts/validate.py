@@ -22,12 +22,17 @@ B = {1: 1.0, 2: PI / 4.0, 3: PI / 6.0}          # eta = B[d] * rho at sigma = 1
 
 
 def f_ex(d, rho):
-    """beta f_ex per d-volume: Tonks / SPT / CS."""
+    """beta f_ex per d-volume: Tonks (exact) / Henderson (discs) / CS.
+    Discs use Henderson rather than SPT: the SPT mu-inversion is -1.1% off the
+    true disc fluid at eta = 0.4 (reviewed), which would eat half the check's
+    tolerance budget; Henderson tracks the true EOS to ~0.1%."""
     eta = B[d] * rho
     if d == 1:
         return -rho * np.log(1.0 - eta)
     if d == 2:
-        return rho * (-np.log(1.0 - eta) + eta / (1.0 - eta))
+        x = np.linspace(1e-9, eta, 4000)
+        zx = (1.0 + x ** 2 / 8.0) / (1.0 - x) ** 2
+        return rho * np.trapz((zx - 1.0) / x, x)
     return rho * (4.0 * eta - 3.0 * eta ** 2) / (1.0 - eta) ** 2
 
 
@@ -76,14 +81,19 @@ eta = 0.5
 mu = mu_of_rho(1, eta)
 P = p_of_rho(1, eta)
 spec = make_spec(1, H=8.0, z_act=float(np.exp(mu)), slit=True)
-z, rho, Ns, acc = burn_and_sample(spec, C=32, seed=7, n_burn=100_000,
-                                  n_run=400_000, thin=500, nbins=160)
-# quadratic extrapolation of the first three bins to z = 0+
-c = np.polyfit(z[:3], rho[:3], 2)
+z, rho, Ns, acc = burn_and_sample(spec, C=48, seed=7, n_burn=100_000,
+                                  n_run=600_000, thin=500, nbins=160)
+# both walls are equivalent — mirror-average halves the counting variance,
+# then quadratic-extrapolate the first three bins to z = 0+. Even so the
+# extrapolation amplifies bin noise to sigma(contact) ~ 0.03 here, so the
+# tolerance is set at ~4 sigma (reviewed: a 5% gate at the old statistics
+# was a 43% coin-flip false-FAIL).
+rho_sym = 0.5 * (rho + rho[::-1])
+c = np.polyfit(z[:3], rho_sym[:3], 2)
 contact = np.polyval(c, 0.0)
 rel = abs(contact - P) / P
 print(f"contact rho(0+)={contact:.4f} vs beta P={P:.4f} (rel {rel:.3f})")
-fails += rel > 0.05
+fails += rel > 0.12
 
 print("VALIDATE", "FAIL" if fails else "PASS", f"({fails} failures)")
 sys.exit(1 if fails else 0)
