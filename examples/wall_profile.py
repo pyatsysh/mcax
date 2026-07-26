@@ -23,6 +23,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# nord ink, so the figure reads as part of the page rather than pasted onto it
+plt.rcParams.update({"text.color": "#2E3440", "axes.labelcolor": "#2E3440",
+                     "xtick.color": "#2E3440", "ytick.color": "#2E3440",
+                     "axes.edgecolor": "#4C566A", "font.size": 10})
+
 from mcax import make_spec, burn_and_sample, summary, format_summary, eos
 
 RHO_B = 0.5                       # target bulk density of the reservoir
@@ -47,14 +52,14 @@ print(f"contact rho(0+) = {contact:.4f}   exact beta P = {P:.4f}   "
       f"rel {abs(contact - P) / P:.4f}")
 
 fig, ax = plt.subplots(figsize=(7.0, 4.2), constrained_layout=True)
-ax.plot(res.z, res.rho, lw=1.0, alpha=0.45, color="#4C6EF5",
+ax.plot(res.z, res.rho, lw=1.0, alpha=0.45, color="#81A1C1",
         label="mcax, raw")
-ax.plot(res.z, rho_sym, lw=1.8, color="#1B3BAF", label="mcax, mirror-averaged")
-ax.axhline(RHO_B, ls="--", lw=1.0, color="#495057",
+ax.plot(res.z, rho_sym, lw=1.8, color="#5E81AC", label="mcax, mirror-averaged")
+ax.axhline(RHO_B, ls="--", lw=1.0, color="#4C566A",
            label=rf"bulk $\rho_b = {RHO_B}$")
-ax.axhline(P, ls=":", lw=1.4, color="#C92A2A",
+ax.axhline(P, ls=":", lw=1.4, color="#BF616A",
            label=rf"exact contact $\beta P = {P:.3f}$")
-ax.plot([0.0], [contact], "o", ms=6, color="#C92A2A",
+ax.plot([0.0], [contact], "o", ms=6, color="#BF616A",
         label=rf"extrapolated $\rho(0^+) = {contact:.3f}$")
 
 ax.set_xlabel(r"$z / \sigma$   (centre coordinate)")
