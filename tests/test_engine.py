@@ -318,12 +318,31 @@ def test_make_spec_sizes_capacity_with_headroom():
 
 
 def test_spec_is_hashable_so_jit_can_treat_it_as_static():
-    """``run`` takes the spec as a static argument; that requires hashability,
-    and a NamedTuple of Python scalars gives it. A stray array field would
-    break jit in a way that only shows up at call time."""
+    """``run`` takes the spec as a static argument, which requires hashability.
+
+    A stray array field would break jit in a way that only shows up at call
+    time, so check the property directly rather than the types it happens to
+    hold today.
+    """
     spec = make_spec(d=1, H=10.0, z_act=1.0, slit=False)
     hash(spec)
-    assert all(isinstance(v, (int, float, bool)) for v in spec)
+    assert not any(isinstance(v, (onp.ndarray, np.ndarray)) for v in spec)
+
+
+def test_equal_specs_hash_equal_so_jit_reuses_the_compilation():
+    """Two specs built the same way must be interchangeable to the jit cache.
+
+    This is why the fields in ``mcax.fields`` are NamedTuples: a closure would
+    hash by identity, so a sweep that rebuilt the same wall at every state
+    point would recompile the kernel at every state point.
+    """
+    from mcax import fields
+    kw = dict(d=1, H=10.0, z_act=1.0, slit=True)
+    assert make_spec(**kw) == make_spec(**kw)
+    a = make_spec(field=fields.Gravity(2.0), **kw)
+    b = make_spec(field=fields.Gravity(2.0), **kw)
+    assert a == b and hash(a) == hash(b)
+    assert a != make_spec(field=fields.Gravity(2.5), **kw)
 
 
 @pytest.mark.parametrize("d", [0, 4, 2.5])

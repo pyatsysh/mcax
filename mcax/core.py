@@ -5,12 +5,17 @@ The configurational weight of a muVT state with N particles at positions r^N is
     P(N, r^N)  ~  z^N / N!  exp(-beta U(r^N)),        z = exp(beta mu)
 
 and for hard particles U is 0 or infinity, so the Boltzmann factor is an
-INDICATOR: 1 if no pair overlaps, 0 otherwise. There are no energies to compute
-anywhere below, only an overlap test, and the exact acceptances follow:
+INDICATOR: 1 if no pair overlaps, 0 otherwise, and the exact acceptances follow:
 
     displacement : accept iff no overlap and inside the walls
     insertion    : accept with min(1, z V / (N+1)) iff no overlap
     deletion     : accept with min(1, N / (z V))
+
+An external field beta V_ext(r) multiplies each of these by the obvious
+Boltzmann factor (exp(-[V' - V]) displacing, exp(-V) inserting, exp(+V)
+deleting) and changes nothing else: the overlap test is still an indicator and
+the geometry is still hard. With `field = None` the factors are exactly one and
+the arithmetic below is the pure hard-particle path. See `mcax.fields`.
 
 Design: many independent chains in lockstep on one device. A chain is a
 fixed-capacity particle set (positions (Nmax, d) plus an alive mask); every MC
@@ -20,12 +25,13 @@ internally, so the parallelism has to come from the only other axis available,
 and statistics come from the chain batch (vmap) rather than from clever
 single-chain moves. That is the shape accelerators actually like.
 
-Geometry: `slit` puts hard walls on the CENTRES at x_d = 0 and H, the same
-centre-exclusion convention as the DFT reference data, so the wall theorem
-rho(0+) = beta P applies literally rather than at a shifted profile. `bulk` is
-periodic everywhere. Dimensions d = 1, 2, 3, and d = 1 (hard rods) is kept
-deliberately: Tonks/Percus is exact there, which makes rods the engine's razor.
-Any detailed-balance or bookkeeping bug shows up against an exact answer.
+Geometry lives in `mcax.geometry` and covers bulk, slit, spherical and
+cylindrical pores and a wedge. Walls act on CENTRES in every one of them, the
+same centre-exclusion convention as the DFT reference data, so in a slit the
+wall theorem rho(0+) = beta P applies literally rather than at a shifted
+profile. Dimensions d = 1, 2, 3, and d = 1 (hard rods) is kept deliberately:
+Tonks/Percus is exact there, which makes rods the engine's razor. Any detailed
+balance or bookkeeping bug shows up against an exact answer.
 
 Everything is float64 and jit/scan-compiled: a production sweep is one compiled
 call per state point.
@@ -36,6 +42,9 @@ from typing import NamedTuple
 import numpy as onp
 import jax
 import jax.numpy as np
+
+from . import fields
+from . import geometry
 
 
 def require_float64():
@@ -65,17 +74,26 @@ def require_float64():
 class MCSpec(NamedTuple):
     d: int             # fluid dimension: 1, 2, 3
     Nmax: int          # per-chain capacity
-    H: float           # wall separation (centre-accessible) along the last axis
-    Lperp: float       # periodic box edge for the d-1 transverse axes
+    H: float           # confining length: see `mcax.geometry` for its meaning
+    Lperp: float       # transverse edge, or the radius of a cylinder
     sigma: float       # hard-core diameter
     z_act: float       # activity exp(beta mu)
     dmax: float        # displacement half-width
-    slit: bool         # True: hard walls at 0, H; False: periodic (bulk)
+    geom: str          # bulk | slit | sphere | cylinder | wedge
     p_disp: float      # move mix: displacement prob (rest split ins/del)
+    psi: float         # wedge opening half-angle, radians; ignored otherwise
+    field: object      # beta V_ext(r) callable, or None. See `mcax.fields`
+
+    @property
+    def slit(self):
+        """Kept because it reads better than `geom == "slit"` at the call site,
+        and because it was the original spelling of the whole geometry."""
+        return self.geom == "slit"
 
 
 def make_spec(d, H, z_act, Lperp = 10.0, sigma = 1.0, Nmax = None, dmax = 0.15,
-              slit = True, p_disp = 0.5):
+              slit = None, p_disp = 0.5, geom = None, psi = onp.pi / 6.0,
+              field = None):
     """Build the static description of a state point.
 
     E.G. hard spheres at bulk packing fraction eta = 0.3 in a slit 8 diameters
@@ -83,6 +101,16 @@ def make_spec(d, H, z_act, Lperp = 10.0, sigma = 1.0, Nmax = None, dmax = 0.15,
 
         rho_b = 0.3 / mcax.eos.B[3]
         spec  = make_spec(d = 3, H = 8.0, z_act = eos.z_of_rho(3, rho_b))
+
+    and the same fluid in a spherical pore of radius 5, or a wedge of opening
+    half-angle 30 degrees:
+
+        spec = make_spec(d = 3, geom = "sphere", H = 5.0, z_act = ...)
+        spec = make_spec(d = 3, geom = "wedge", H = 8.0, psi = onp.pi/6, ...)
+
+    `H` and `Lperp` mean different things in different geometries and
+    `geometry.describe(spec)` will say which. Passing `slit = True/False`
+    still works and selects `slit` or `bulk`.
     """
     if d != int(d) or int(d) not in (1, 2, 3):
         # Nothing in the kernel would object to d = 4: the geometry is written
@@ -92,12 +120,21 @@ def make_spec(d, H, z_act, Lperp = 10.0, sigma = 1.0, Nmax = None, dmax = 0.15,
         # non-integer half of the test matters just as much: every dimension in
         # here goes through int(), so d = 2.5 would quietly become a 2-D run.
         raise ValueError(f"d must be 1, 2 or 3, got {d}")
-    vol = H * Lperp ** (d - 1)
+    if geom is None:
+        geom = "slit" if (slit is None or slit) else "bulk"
+    elif slit is not None:
+        raise ValueError("pass geom or slit, not both")
+    geometry.check(geom, int(d))
+
+    spec = MCSpec(int(d), 0, float(H), float(Lperp), float(sigma),
+                  float(z_act), float(dmax), str(geom), float(p_disp),
+                  float(psi), field)
     if Nmax is None:
-        # dense-limit headroom: eta_max ~ 0.75 in any d at sigma = 1
-        Nmax = int(1.6 * vol) + 64
-    return MCSpec(int(d), int(Nmax), float(H), float(Lperp), float(sigma),
-                  float(z_act), float(dmax), bool(slit), float(p_disp))
+        # dense-limit headroom: eta_max ~ 0.75 in any d at sigma = 1. Sized on
+        # the ACCESSIBLE volume, so a spherical pore is not handed the capacity
+        # of the cube around it.
+        Nmax = int(1.6 * geometry.volume(spec)) + 64
+    return spec._replace(Nmax = int(Nmax))
 
 
 class MCState(NamedTuple):
@@ -111,7 +148,7 @@ class MCState(NamedTuple):
 
 class Result(NamedTuple):
     """What a sampling run produced, plus what is needed to trust it."""
-    z: onp.ndarray         # (nbins,) bin centres on the wall axis
+    z: onp.ndarray         # (nbins,) bin centres: wall axis, or radius
     rho: onp.ndarray       # (nbins,) density profile, per unit d-volume
     Ns: onp.ndarray        # (C, nchunks) particle-number series: (chain, draw)
     acc: onp.ndarray       # (3,) acceptance rates: disp, ins, del
@@ -159,11 +196,21 @@ def lattice_fill(spec, n0, seed = 0):
     must equilibrate to the same density, and the tests check that they do.
     """
     a = 1.05 * spec.sigma
-    zs = onp.arange(0.5 * a, spec.H - 0.01, a)
-    per = [onp.arange(0.5 * a, spec.Lperp - 0.49 * a, a)
-           for _ in range(spec.d - 1)]
-    grids = onp.meshgrid(*(per + [zs]), indexing = "ij")
+    lo, hi = geometry.bbox(spec)
+    _, wraps = geometry.periods(spec)
+    # A periodic axis has to stop short by half a lattice spacing, or the last
+    # site and the first are neighbours ACROSS the boundary and overlap. The
+    # aperiodic axes have no such wrap and run to the wall.
+    axes = [onp.arange(l + 0.5 * a, h - (0.49 * a if w else 0.01), a)
+            for l, h, w in zip(lo, hi, wraps)]
+    grids = onp.meshgrid(*axes, indexing = "ij")
     sites = onp.stack([g.ravel() for g in grids], axis = -1)
+    # The lattice is built over the bounding box, so in a curved pore most of
+    # it is outside the region. Filter on the host, where a boolean mask costs
+    # nothing and no static shape has to be guessed.
+    inside = onp.array([bool(geometry.contains(spec, np.asarray(s)))
+                        for s in sites]) if len(sites) else onp.zeros(0, bool)
+    sites = sites[inside]
     rng = onp.random.default_rng(seed)
     rng.shuffle(sites)
     return sites[:min(n0, len(sites))]
@@ -206,18 +253,13 @@ def init_state(spec, C, seed = 0, n0 = 0):
 # ---- per-chain kernels (vmapped over the batch by run()) ------------------ #
 
 def _dist2(spec, a, b):
-    """Squared centre distance with minimum image on transverse axes; the wall
-    axis (last) is direct in a slit, periodic in bulk."""
-    dr = a - b
-    if spec.slit:
-        per = dr[..., :-1]
-        per = per - spec.Lperp * np.round(per / spec.Lperp)
-        dz = dr[..., -1:]
-        dr = np.concatenate([per, dz], axis = -1) if spec.d > 1 else dz
-    else:
-        L = np.array([spec.Lperp] * (spec.d - 1) + [spec.H])
-        dr = dr - L * np.round(dr / L)
-    return np.sum(dr * dr, axis = -1)
+    """Squared centre distance, minimum image on whichever axes are periodic.
+
+    Which those are is the geometry's business, not this function's: `bulk` is
+    periodic everywhere, a slit on its transverse axes, a cylinder along its
+    axis only, and a spherical pore nowhere at all.
+    """
+    return np.sum(geometry.min_image(spec, a - b) ** 2, axis = -1)
 
 
 def _overlaps_any(spec, pos, alive, trial, skip_idx):
@@ -243,7 +285,12 @@ def _step_chain(spec, carry, _):
     pos, alive, key, acc, tot, nhi = carry
     key, k_type, k_pick, k_move, k_acc = jax.random.split(key, 5)
     N = np.sum(alive)
-    V = spec.H * spec.Lperp ** (spec.d - 1)
+    # The BOUNDING-box volume, not the accessible one. Insertions are proposed
+    # uniformly in the bounding box and rejected if they land outside the
+    # region, so V_box is what the Metropolis-Hastings ratio carries. See the
+    # proposal note in `mcax.geometry`.
+    V = geometry.bbox_volume(spec)
+    lo, hi = (np.asarray(x) for x in geometry.bbox(spec))
     u_type = jax.random.uniform(k_type)
     p_ins = spec.p_disp + 0.5 * (1.0 - spec.p_disp)
     move = np.where(u_type < spec.p_disp, 0, np.where(u_type < p_ins, 1, 2))
@@ -252,38 +299,32 @@ def _step_chain(spec, carry, _):
     idx = _pick_alive(k_pick, alive)
     delta = spec.dmax * jax.random.uniform(k_move, (spec.d,), minval = -1.0,
                                            maxval = 1.0)
-    trial = pos[idx] + delta
-    if spec.slit:
-        perp = np.mod(trial[:-1], spec.Lperp) if spec.d > 1 else trial[:0]
-        zc = trial[-1:]
-        trial_d = np.concatenate([perp, zc])
-        in_wall = (zc[0] >= 0.0) & (zc[0] <= spec.H)
-    else:
-        L = np.array([spec.Lperp] * (spec.d - 1) + [spec.H])
-        trial_d = np.mod(trial, L)
-        in_wall = np.asarray(True)
-    disp_ok = alive[idx] & in_wall & \
+    trial_d = geometry.wrap(spec, pos[idx] + delta)
+    # One-body energies. With no field these are exact zeros and every
+    # exponential below collapses to 1, so the hard-particle path is unchanged.
+    v_old = fields.evaluate(spec.field, pos[idx])
+    v_new = fields.evaluate(spec.field, trial_d)
+    disp_ok = alive[idx] & geometry.contains(spec, trial_d) & \
+        (jax.random.uniform(k_acc) < np.exp(-(v_new - v_old))) & \
         ~_overlaps_any(spec, pos, alive, trial_d, idx)
     pos_disp = pos.at[idx].set(np.where(disp_ok, trial_d, pos[idx]))
 
     # -- insertion branch --------------------------------------------------- #
     slot = np.argmax(~alive)                        # first free slot
     has_slot = ~np.all(alive)
-    if spec.slit:
-        lo = np.array([0.0] * (spec.d - 1) + [0.0])
-        hi = np.array([spec.Lperp] * (spec.d - 1) + [spec.H])
-    else:
-        lo = np.zeros(spec.d)
-        hi = np.array([spec.Lperp] * (spec.d - 1) + [spec.H])
     new = jax.random.uniform(k_move, (spec.d,), minval = lo, maxval = hi)
-    a_ins = spec.z_act * V / (N + 1.0)
-    ins_ok = has_slot & (jax.random.uniform(k_acc) < np.minimum(1.0, a_ins)) & \
+    a_ins = spec.z_act * V / (N + 1.0) * np.exp(-fields.evaluate(spec.field, new))
+    ins_ok = has_slot & geometry.contains(spec, new) & \
+        (jax.random.uniform(k_acc) < np.minimum(1.0, a_ins)) & \
         ~_overlaps_any(spec, pos, alive, new, spec.Nmax)
     pos_ins = pos.at[slot].set(np.where(ins_ok, new, pos[slot]))
     alive_ins = alive.at[slot].set(np.where(ins_ok, True, alive[slot]))
 
     # -- deletion branch ---------------------------------------------------- #
-    a_del = N / np.maximum(spec.z_act * V, 1e-300)
+    # The +v_old: removing a particle from a deep well costs its binding energy,
+    # so a bound layer is hard to strip. Sign errors here are invisible in the
+    # mean density and obvious in the profile.
+    a_del = N / np.maximum(spec.z_act * V, 1e-300) * np.exp(v_old)
     del_ok = (N > 0) & (jax.random.uniform(k_acc) < np.minimum(1.0, a_del))
     alive_del = alive.at[idx].set(np.where(del_ok, False, alive[idx]))
 
@@ -303,9 +344,10 @@ def _step_chain(spec, carry, _):
 
 
 def _hist_chain(spec, pos, alive, nbins):
-    """z-histogram of alive centres (the wall axis)."""
-    zc = pos[:, -1]
-    idx = np.clip((zc / spec.H * nbins).astype(np.int32), 0, nbins - 1)
+    """Histogram of alive centres along the geometry's profile coordinate."""
+    zc = geometry.profile_coord(spec, pos)
+    idx = np.clip((zc / geometry.extent(spec) * nbins).astype(np.int32),
+                  0, nbins - 1)
     return np.zeros(nbins).at[idx].add(alive.astype(np.float64))
 
 
@@ -357,7 +399,7 @@ def run(spec, state, nsteps, thin, nbins, nbins_g = 0, rmax = None):
     require_float64()
     C = state.pos.shape[0]
     nchunks = nsteps // thin
-    if nbins_g and not spec.slit:
+    if nbins_g and spec.geom == "bulk":
         rmax = _default_rmax(spec) if rmax is None else rmax
     elif nbins_g:
         raise ValueError(
@@ -395,16 +437,23 @@ def run(spec, state, nsteps, thin, nbins, nbins_g = 0, rmax = None):
 
 
 def _default_rmax(spec):
-    """Half the shortest box edge: past that the minimum image is ambiguous."""
-    return 0.5 * min([spec.Lperp] * (spec.d - 1) + [spec.H])
+    """Half the shortest periodic edge: past that the minimum image is
+    ambiguous. Only ever asked in bulk, where every axis is periodic."""
+    per, _ = geometry.periods(spec)
+    return 0.5 * float(per.min())
 
 
 def density_profile(spec, hist, nsamples):
-    """Average over chains -> rho(z) on bin centres (per unit d-volume)."""
+    """Average over chains -> rho on bin centres, per unit d-volume.
+
+    The divisor is the geometry's own bin volume, which for a spherical pore is
+    a shell growing like r^{d-1}. Dividing by a constant slab there would tilt
+    the whole profile in a way that looks exactly like a packing effect.
+    """
     nbins = hist.shape[-1]
-    dz = spec.H / nbins
-    area = spec.Lperp ** (spec.d - 1)
-    rho = hist.sum(axis = 0) / (hist.shape[0] * nsamples * area * dz)
+    dz = geometry.extent(spec) / nbins
+    cell = geometry.bin_volume(spec, nbins)
+    rho = hist.sum(axis = 0) / (hist.shape[0] * nsamples * cell)
     z = (onp.arange(nbins) + 0.5) * dz
     return z, rho
 
