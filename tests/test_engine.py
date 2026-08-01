@@ -20,6 +20,24 @@ from conftest import alive_positions, min_pair_separation
 
 DIMS = [1, 2, 3]
 
+# The precision guard has to be tested in a fresh interpreter. `jax_enable_x64`
+# is read once, at first array creation, and conftest sets it for the whole
+# session, so there is no way to unset it in-process without poisoning every
+# jit cache in the suite. A subprocess is also the honest test: it reproduces
+# exactly what a user gets for forgetting the flag in their own script.
+_NO_X64 = """
+import sys
+sys.path.insert(0, %r)
+import mcax
+try:
+    mcax.require_float64()
+except RuntimeError as e:
+    print("RAISED")
+    assert "jax_enable_x64" in str(e), "the message must name the flag"
+    sys.exit(0)
+sys.exit("guard did not fire in single precision")
+"""
+
 
 def _short(spec, C=4, seed=0, n_burn=2_000, n_run=4_000, thin=200, nbins=20,
            n0=0):
@@ -288,8 +306,8 @@ def test_state_can_be_continued():
     """The returned state is a real restart point, not a summary."""
     spec = make_spec(d=1, H=10.0, z_act=1.0, slit=False)
     res = _short(spec)
-    st2, hist, Ns = run(spec, res.state, 1_000, 200, 10)
-    assert Ns.shape == (4, 5)
+    st2, ac = run(spec, res.state, 1_000, 200, 10)
+    assert ac.Ns.shape == (4, 5)
     assert onp.all(onp.asarray(st2.nhi) >= onp.asarray(res.state.nhi))
 
 
@@ -306,3 +324,37 @@ def test_spec_is_hashable_so_jit_can_treat_it_as_static():
     spec = make_spec(d=1, H=10.0, z_act=1.0, slit=False)
     hash(spec)
     assert all(isinstance(v, (int, float, bool)) for v in spec)
+
+
+@pytest.mark.parametrize("d", [0, 4, 2.5])
+def test_make_spec_rejects_dimensions_with_no_reference_eos(d):
+    """d = 4 would run happily and could never be checked against anything."""
+    with pytest.raises(ValueError):
+        make_spec(d=d, H=8.0, z_act=1.0)
+
+
+# ---- the precision guard -------------------------------------------------- #
+
+def test_float64_guard_passes_when_x64_is_on():
+    """conftest enables it for the suite, so this is the happy path."""
+    from mcax import require_float64
+    require_float64()
+
+
+def test_float64_guard_raises_in_a_fresh_single_precision_interpreter():
+    """The failure this prevents is silent, which is why the guard exists.
+
+    In float32 the overlap test `d2 >= sigma**2` admits marginal overlaps and
+    nothing downstream shows it: the density is plausible and the diagnostics
+    converge. Anything that lets a run start in single precision is therefore a
+    correctness regression, not an ergonomics one.
+    """
+    import subprocess
+    import sys
+    import pathlib
+    root = str(pathlib.Path(__file__).resolve().parent.parent)
+    out = subprocess.run([sys.executable, "-c", _NO_X64 % root],
+                         capture_output=True, text=True, timeout=300,
+                         env={"JAX_PLATFORMS": "cpu", "PATH": "/usr/bin:/bin"})
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert "RAISED" in out.stdout

@@ -38,6 +38,30 @@ import jax
 import jax.numpy as np
 
 
+def require_float64():
+    """Refuse to run in single precision, loudly, rather than be subtly wrong.
+
+    The overlap test is `d2 >= sigma**2`, an exact comparison against a boundary
+    that a float32 rounding error steps across in either direction. In single
+    precision the sampler therefore admits marginal overlaps and rejects
+    marginal legal moves, and NOTHING downstream reveals it: the density comes
+    out plausible, the acceptance rates look ordinary, the diagnostics converge.
+    A run that is silently wrong is worse than one that will not start, so this
+    raises.
+
+    JAX defaults to float32 and the flag has to be set before the first array is
+    made, which is exactly the kind of requirement that gets left out of a
+    script written in a hurry. Hence a guard rather than a line in the README.
+    """
+    if np.asarray(1.0).dtype != np.float64:
+        raise RuntimeError(
+            "mcax requires float64, but JAX is in single precision. Add\n\n"
+            "    import jax; jax.config.update('jax_enable_x64', True)\n\n"
+            "BEFORE creating any array (the flag is read once, at first use). "
+            "The overlap test is an exact comparison against sigma^2, so in "
+            "float32 this engine silently samples the wrong ensemble.")
+
+
 class MCSpec(NamedTuple):
     d: int             # fluid dimension: 1, 2, 3
     Nmax: int          # per-chain capacity
@@ -60,6 +84,14 @@ def make_spec(d, H, z_act, Lperp = 10.0, sigma = 1.0, Nmax = None, dmax = 0.15,
         rho_b = 0.3 / mcax.eos.B[3]
         spec  = make_spec(d = 3, H = 8.0, z_act = eos.z_of_rho(3, rho_b))
     """
+    if d != int(d) or int(d) not in (1, 2, 3):
+        # Nothing in the kernel would object to d = 4: the geometry is written
+        # for general d and would happily run. But `mcax.eos` has no reference
+        # equation of state there, so the answer could never be checked against
+        # anything, and an unvalidatable number is not worth producing. The
+        # non-integer half of the test matters just as much: every dimension in
+        # here goes through int(), so d = 2.5 would quietly become a 2-D run.
+        raise ValueError(f"d must be 1, 2 or 3, got {d}")
     vol = H * Lperp ** (d - 1)
     if Nmax is None:
         # dense-limit headroom: eta_max ~ 0.75 in any d at sigma = 1
@@ -88,6 +120,10 @@ class Result(NamedTuple):
     capacity: int          # spec.Nmax
     saturation: float      # n_hi / capacity, see `capacity_warning`
     state: MCState         # final state, so a run can be continued
+    hist: onp.ndarray      # (C, nbins) raw counts behind `rho`
+    hist_n: onp.ndarray    # (C, nbins) the same, weighted by instantaneous N
+    gr: onp.ndarray        # (C, nbins_g) pair separations, empty unless asked
+    nsamples: int          # draws per chain, the divisor for all of the above
 
     @property
     def capacity_warning(self):
@@ -149,6 +185,7 @@ def init_state(spec, C, seed = 0, n0 = 0):
     independent draws per chain and had no business looking converged. Use it
     as a signal to run longer rather than as a reason to go back.
     """
+    require_float64()
     keys = jax.random.split(jax.random.PRNGKey(seed), C)
     pos = np.zeros((C, spec.Nmax, spec.d))
     alive = np.zeros((C, spec.Nmax), dtype = bool)
@@ -272,12 +309,61 @@ def _hist_chain(spec, pos, alive, nbins):
     return np.zeros(nbins).at[idx].add(alive.astype(np.float64))
 
 
-@partial(jax.jit, static_argnums = (0, 2, 3, 4))
-def run(spec, state, nsteps, thin, nbins):
-    """Advance all chains `nsteps`; between thinning intervals accumulate the
-    z-histogram and the N-series. Returns (state, hist (C, nbins), Ns (C, k))."""
+def _pair_hist_chain(spec, pos, alive, nbins_g, rmax):
+    """Histogram of live pair separations, i < j, out to `rmax`.
+
+    Costs an (Nmax, Nmax) distance matrix, so it is the one accumulator here
+    that is not free: at Nmax = 600 and 32 chains under vmap it is a few
+    hundred megabytes of transient. It runs only at thinning boundaries, never
+    per step, which is what keeps that affordable, and `nbins_g = 0` switches
+    it off entirely.
+    """
+    d2 = _dist2(spec, pos[:, None, :], pos[None, :, :])     # (Nmax, Nmax)
+    r = np.sqrt(d2)
+    iu = np.arange(spec.Nmax)
+    ok = (iu[:, None] < iu[None, :]) & alive[:, None] & alive[None, :] \
+        & (r < rmax)
+    idx = np.clip((r / rmax * nbins_g).astype(np.int32), 0, nbins_g - 1)
+    return np.zeros(nbins_g).at[idx].add(ok.astype(np.float64))
+
+
+class Accum(NamedTuple):
+    """What a scan of `run` accumulated, in raw counts.
+
+    Kept as counts rather than normalised densities so that two runs can be
+    added together, which is what continuing a run from `result.state` needs.
+    `mcax.observables` does the normalising.
+    """
+    hist: np.ndarray       # (C, nbins) summed instantaneous z-histogram
+    Ns: np.ndarray         # (C, nchunks) particle number: (chain, draw)
+    hist_n: np.ndarray     # (C, nbins) the same histogram weighted by N
+    gr: np.ndarray         # (C, nbins_g) pair separations, empty if switched off
+
+
+@partial(jax.jit, static_argnums = (0, 2, 3, 4, 5, 6))
+def run(spec, state, nsteps, thin, nbins, nbins_g = 0, rmax = None):
+    """Advance all chains `nsteps`, accumulating at every thinning boundary.
+
+    Returns (state, `Accum`). Three of the five accumulators are there for the
+    fluctuation identities in `mcax.observables`: `hist_n` is the density-number
+    cross-covariance that gives d rho(z)/d(beta mu), and `gr` gives the pair
+    correlations. All are sampled at thinning boundaries, so they cost one
+    reduction per `thin` steps and nothing per step.
+
+    The precision guard runs at TRACE time, so it costs one comparison per
+    compile and nothing per step, and it still catches a state handed in from
+    somewhere other than `init_state`.
+    """
+    require_float64()
     C = state.pos.shape[0]
     nchunks = nsteps // thin
+    if nbins_g and not spec.slit:
+        rmax = _default_rmax(spec) if rmax is None else rmax
+    elif nbins_g:
+        raise ValueError(
+            "pair correlations are only accumulated in bulk. Against a wall "
+            "the pair distribution depends on both centres, g(r1, r2), and "
+            "averaging that over the profile is not the g(r) anybody means.")
 
     def chunk(carry, _):
         st = carry
@@ -290,13 +376,27 @@ def run(spec, state, nsteps, thin, nbins):
         pos, alive, key, acc, tot, nhi = st
         h = jax.vmap(lambda p, a: _hist_chain(spec, p, a, nbins))(pos, alive)
         n = np.sum(alive, axis = 1)
-        return st, (h, n)
+        if nbins_g:
+            g = jax.vmap(lambda p, a: _pair_hist_chain(
+                spec, p, a, nbins_g, rmax))(pos, alive)
+        else:
+            g = np.zeros((C, 0))
+        return st, (h, n, h * n[:, None], g)
 
     carry = (state.pos, state.alive, state.key, state.acc, state.tot, state.nhi)
-    carry, (hists, Ns) = jax.lax.scan(chunk, carry, None, length = nchunks)
-    hist = np.sum(hists, axis = 0)                  # (C, nbins)
-    state = MCState(*carry)
-    return state, hist, np.swapaxes(Ns, 0, 1)       # Ns: (C, nchunks)
+    carry, (hists, Ns, hns, grs) = jax.lax.scan(
+        chunk, carry, None, length = nchunks)
+    return MCState(*carry), Accum(
+        hist = np.sum(hists, axis = 0),             # (C, nbins)
+        Ns = np.swapaxes(Ns, 0, 1),                 # (C, nchunks)
+        hist_n = np.sum(hns, axis = 0),
+        gr = np.sum(grs, axis = 0),
+    )
+
+
+def _default_rmax(spec):
+    """Half the shortest box edge: past that the minimum image is ambiguous."""
+    return 0.5 * min([spec.Lperp] * (spec.d - 1) + [spec.H])
 
 
 def density_profile(spec, hist, nsamples):
@@ -309,7 +409,8 @@ def density_profile(spec, hist, nsamples):
     return z, rho
 
 
-def burn_and_sample(spec, C, seed, n_burn, n_run, thin, nbins, n0 = 0):
+def burn_and_sample(spec, C, seed, n_burn, n_run, thin, nbins, n0 = 0,
+                    nbins_g = 0):
     """Convenience: burn-in, then sample. Returns a `Result`.
 
     `n0` is the lattice-prefill count (see `lattice_fill`). The returned `Ns`
@@ -317,17 +418,22 @@ def burn_and_sample(spec, C, seed, n_burn, n_run, thin, nbins, n0 = 0):
     expect, so it feeds `mcax.diagnostics` (or either of those, if you have
     them) unchanged. Its drift is the equilibration diagnostic, and
     `capacity_warning` should be read before trusting `rho`.
+
+    `nbins_g > 0` additionally accumulates pair separations, in bulk only. It
+    is off by default because it is the one accumulator with a real cost.
     """
     st = init_state(spec, C, seed, n0 = n0)
-    st, _, _ = run(spec, st, n_burn, max(n_burn // 4, 1), nbins)
+    st, _ = run(spec, st, n_burn, max(n_burn // 4, 1), nbins)
     # Reset the counters but NOT nhi: capacity pressure during burn-in is just
     # as much a broken-ensemble signal as during sampling.
     st = st._replace(acc = np.zeros_like(st.acc), tot = np.zeros_like(st.tot))
-    st, hist, Ns = run(spec, st, n_run, thin, nbins)
-    z, rho = density_profile(spec, onp.asarray(hist), n_run // thin)
+    st, ac = run(spec, st, n_run, thin, nbins, nbins_g = nbins_g)
+    z, rho = density_profile(spec, onp.asarray(ac.hist), n_run // thin)
     acc = onp.asarray(st.acc).sum(0) / onp.maximum(onp.asarray(st.tot).sum(0), 1)
-    Ns = onp.asarray(Ns)
+    Ns = onp.asarray(ac.Ns)
     n_hi = int(onp.max(onp.asarray(st.nhi)))
     return Result(z = z, rho = rho, Ns = Ns, acc = acc,
                   n_mean = float(Ns.mean()), n_hi = n_hi, capacity = spec.Nmax,
-                  saturation = n_hi / spec.Nmax, state = st)
+                  saturation = n_hi / spec.Nmax, state = st,
+                  hist = onp.asarray(ac.hist), hist_n = onp.asarray(ac.hist_n),
+                  gr = onp.asarray(ac.gr), nsamples = n_run // thin)

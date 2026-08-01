@@ -42,12 +42,12 @@ print(f"device: {jax.devices()[0].platform}   d=3 eta={args.eta} "
 st = init_state(spec, C, seed=0, n0=n0)
 
 t0 = time.time()
-st, hist, Ns = run(spec, st, 2_000, 500, 160)          # compile + warm
-jax.block_until_ready(hist)
+st, ac = run(spec, st, 2_000, 500, 160)                # compile + warm
+jax.block_until_ready(ac.hist)
 t1 = time.time()
 
-st, hist, Ns = run(spec, st, NSTEP, 500, 160)
-jax.block_until_ready(hist)
+st, ac = run(spec, st, NSTEP, 500, 160)
+jax.block_until_ready(ac.hist)
 t2 = time.time()
 
 sps = NSTEP / (t2 - t1)
