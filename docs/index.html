@@ -236,8 +236,7 @@ res.z, res.rho                             # the density profile</code></pre>
     of a wedge the opening falls below a diameter, and a channel that narrow is
     itself a Tonks gas. Measured 0.264 there against 0.263 exactly.</p>
 
-    <p>Two runs below, kept apart because their provenance differs: the first
-    is the hard-particle run on a GPU, the second the attractive run on CPU.</p>
+    <p>One run, all nine cases on the same card on the same day.</p>
 
     <div class="scroll">
     <table>
@@ -245,18 +244,18 @@ res.z, res.rho                             # the density profile</code></pre>
       <tr><td>d = 1 bulk, &eta; = 0.5</td><td>Tonks and Percus</td>
           <td class="exact">exact</td><td class="num">0.0021</td><td class="num">1.001</td></tr>
       <tr><td>d = 2 bulk, &eta; = 0.4</td><td>Henderson</td>
-          <td>0.1%</td><td class="num">0.0005</td><td class="num">1.002</td></tr>
+          <td>0.1%</td><td class="num">0.0005</td><td class="num">1.005</td></tr>
       <tr><td>d = 3 bulk, &eta; = 0.3</td><td>Carnahan and Starling</td>
-          <td>0.1%</td><td class="num">0.0019</td><td class="num">1.014</td></tr>
+          <td>0.1%</td><td class="num">0.0014</td><td class="num">1.016</td></tr>
       <tr><td>d = 1 wall contact, &eta; = 0.5</td><td>&rho;(0+) = &beta;P, exact Tonks</td>
           <td class="exact">exact</td><td class="num">0.0435</td><td class="num">1.000</td></tr>
     </table>
     </div>
 
-    <p class="eyebrow" style="margin-top:-.4rem">Measured on one GPU, 26 July 2026,
-    reproduced by <code>scripts/validate.py --markdown</code></p>
+    <p class="eyebrow" style="margin-top:-.4rem">Measured on one GPU, 1 August 2026,
+    reproduced by <code>scripts/validate.py --attractive --markdown</code></p>
 
-    <h3>With attraction switched on</h3>
+    <h3>The same run, with attraction switched on</h3>
     <div class="scroll">
     <table>
       <tr><th>Case</th><th>Reference</th><th>Reference accuracy</th><th>Measured rel. error</th><th>split R-hat</th></tr>
@@ -273,15 +272,16 @@ res.z, res.rho                             # the density profile</code></pre>
     </table>
     </div>
 
-    <p class="eyebrow" style="margin-top:-.4rem">Measured on CPU, 1 August 2026,
-    reproduced by <code>scripts/validate.py --dims 1 --attractive --markdown</code></p>
+    <p>Takahashi's solution is exact for a well narrower than two diameters, so
+    these are checks against a closed form and not against somebody else's
+    simulation. All four bulk cases land inside a tenth of a percent. A sign
+    error in the energy, a double count, or a failure to exclude a particle from
+    its own neighbour list would each move them by percent-scale amounts.</p>
 
-    <p>The bulk rows come out tighter than the hard-rod row above them, and that
-    is sampling rather than physics: they run 32 chains of 600 thousand steps
-    against that row's 16 of 200 thousand, in a longer box and at lower density.
-    The contact row is looser than either, because extrapolating a quadratic
-    through three bins down to the wall amplifies bin noise, exactly as it does
-    without attraction.</p>
+    <p>Every one-dimensional row here is bit-identical to the same case run on
+    CPU: same seeds, same means, same effective sample size, same digits. That is
+    worth more than it looks, because it says the batching and the reductions are
+    not quietly device-dependent.</p>
 
     <p>Every case asserts split R-hat alongside the density, and that is not
     decoration. On the first full run the three-dimensional case matched

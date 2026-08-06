@@ -145,6 +145,60 @@ that is wrong. Split R-hat does not reliably catch this either, because every
 chain can stick in the same phase. There is no reweighting or umbrella sampling
 here. Stay supercritical or dilute, and watch the `N` histogram.
 
+### The zero-dimensional limit
+
+`d = 0` is not a fourth dimension, because there are no positions to sample. It
+is a **cavity too small to hold two particles**, and it matters far more than
+that sounds: fundamental measure theory is constructed so that dimensional
+crossover reproduces it exactly, which is where the logarithm in the Rosenfeld
+functional comes from. It is the sharpest of the dimensional reductions and the
+one an approximate functional most often fails.
+
+mcax reaches it through geometry. A spherical pore of radius below `sigma/2`
+admits at most one centre in any dimension, since two centres inside it are at
+most `2R` apart:
+
+```python
+spec = make_spec(d = 3, geom = "sphere", H = 0.4, z_act = 0.5, Nmax = 4)
+geometry.is_zero_dimensional(spec)      # True
+```
+
+The whole system is two states, so everything about it is exact and lives in
+`mcax.eos`:
+
+```
+eta_0d(z, V)  = z V / (1 + z V)        occupancy, saturating at 1 for any z
+var_n_0d(eta) = eta (1 - eta)          Bernoulli, fixed entirely by the mean
+f_ex_0d(eta)  = eta + (1 - eta) ln(1 - eta)
+mu_ex_0d(eta) = -ln(1 - eta)
+```
+
+Measured at d = 3, R = 0.4, z = 0.5, where 48% of insertion proposals are
+rejected on the geometry: exact occupancy 0.118198, measured 0.118207 +/-
+0.000039 over 2.6e8 steps. The variance is the better test of the two, because a
+mean could come out right for an engine that merely never inserted twice.
+
+The name invites a wrong picture, so it is worth being explicit: the cavity is
+not a point and it is not empty. It is an ordinary region with an ordinary
+volume, and at activity `z` it is occupied a fraction `zV/(1+zV)` of the time.
+What is zero-dimensional is the excess free energy, which forgets the cavity
+entirely. Holding the occupancy at `eta = 1/2` and varying the cavity over a
+factor of 27 in volume and over d = 1, 2, 3:
+
+| cavity | V | mu_ex measured | exact |
+|---|---|---|---|
+| sphere d = 3, R = 0.20 | 0.0335 | +0.69533 | +0.69315 |
+| sphere d = 3, R = 0.40 | 0.2681 | +0.69533 | +0.69315 |
+| sphere d = 3, R = 0.49 | 0.4928 | +0.69533 | +0.69315 |
+| sphere d = 2, R = 0.40 | 0.5027 | +0.69405 | +0.69315 |
+| sphere d = 1, R = 0.40 | 0.8000 | +0.69369 | +0.69315 |
+| slit d = 1, H = 0.90 | 0.9000 | +0.69369 | +0.69315 |
+
+Every `ln V` cancels between the total and the ideal free energy, so only the
+ideal part keeps the geometry. That is why the activity needed to reach
+`eta = 1/2` differs as `1/V` while `mu_ex` does not move, and it is why a finite
+ball is a faithful realisation of the limit rather than an approximation to it.
+
 ### Response functions
 
 The sampler cannot be differentiated (see [below](#what-it-will-not-do)), but in
@@ -220,18 +274,22 @@ asymptotic statement and the test says so: one bin further out, where the openin
 has widened to `0.62 sigma`, it is 23% off, which is the `(w/sigma)^2` that the
 quasi-one-dimensional reduction discards.
 
-Two tables below, with different provenance, and it is worth keeping them
-apart. The first is the hard-particle GPU run of 2026-07-26. The second is the
-attractive run of 2026-08-01, measured on CPU.
+One table, one run, all nine cases on the same GPU on the same day.
 
 | Case | Reference | Reference accuracy | Measured rel. error | split R-hat |
 |---|---|---|---|---|
 | d = 1 bulk, eta = 0.5 | Tonks and Percus | **exact** | 0.0021 | 1.001 |
-| d = 2 bulk, eta = 0.4 | Henderson | 0.1% | 0.0005 | 1.002 |
-| d = 3 bulk, eta = 0.3 | Carnahan and Starling | 0.1% | 0.0019 | 1.014 |
+| d = 2 bulk, eta = 0.4 | Henderson | 0.1% | 0.0005 | 1.005 |
+| d = 3 bulk, eta = 0.3 | Carnahan and Starling | 0.1% | 0.0014 | 1.016 |
 | d = 1 slit contact, eta = 0.5 | rho(0+) = beta P, exact Tonks | **exact** | 0.0435 | 1.000 |
+| d = 1 bulk square well, beta eps = 0.5, lam = 1.5, rho = 0.30 | Takahashi | **exact** | 0.00002 | 1.000 |
+| d = 1 bulk square well, beta eps = 1.0, lam = 1.5, rho = 0.30 | Takahashi | **exact** | 0.0011 | 1.000 |
+| d = 1 bulk square well, beta eps = 1.0, lam = 1.5, rho = 0.45 | Takahashi | **exact** | 0.0002 | 1.000 |
+| d = 1 bulk square well, beta eps = 1.5, lam = 1.8, rho = 0.25 | Takahashi | **exact** | 0.0007 | 1.000 |
+| d = 1 slit contact, square well, rho = 0.35 | rho(0+) = beta P, exact Takahashi | **exact** | 0.0628 | 1.000 |
 
-Measured on one GPU, 2026-07-26, reproduced by `scripts/validate.py --markdown`.
+Measured on one GPU, 2026-08-01, reproduced by
+`scripts/validate.py --attractive --markdown` in about 12 minutes.
 The bulk cases use 16 chains and 2e5 steps, except d = 3 which needs 32 chains
 and 2e6 to clear the mixing gate. The contact case extrapolates a quadratic
 through the first three bins after mirror-averaging the two walls, and that
@@ -269,28 +327,27 @@ reproduction from a seed.
 
 ![Hard rods at a wall against exact Tonks](docs/wall_profile.png)
 
-### With attraction switched on
+The last five rows are the attractive ones, and they are the reason `d = 1` was
+worth keeping. Takahashi's solution is exact for `lam <= 2`, so those are checks
+against a closed form and not against somebody else's simulation. All four bulk
+cases land inside 0.1%. A sign error in the energy, a double count, or a failure
+to exclude a particle from its own neighbour list would each move them by
+percent-scale amounts.
 
-| Case | Reference | Reference accuracy | Measured rel. error | split R-hat |
-|---|---|---|---|---|
-| d = 1 bulk square well, beta eps = 0.5, lam = 1.5, rho = 0.30 | Takahashi | **exact** | 0.00002 | 1.000 |
-| d = 1 bulk square well, beta eps = 1.0, lam = 1.5, rho = 0.30 | Takahashi | **exact** | 0.0011 | 1.000 |
-| d = 1 bulk square well, beta eps = 1.0, lam = 1.5, rho = 0.45 | Takahashi | **exact** | 0.0002 | 1.000 |
-| d = 1 bulk square well, beta eps = 1.5, lam = 1.8, rho = 0.25 | Takahashi | **exact** | 0.0007 | 1.000 |
-| d = 1 slit contact, square well, rho = 0.35 | rho(0+) = beta P, exact Takahashi | **exact** | 0.0628 | 1.000 |
+The two contact rows are the loose ones, at 4.4% and 6.3% against a 12% gate,
+and for the same reason in both cases: extrapolating a quadratic through three
+bins down to `z = 0+` amplifies bin noise to about 0.03 absolute. That gate sits
+near four sigma deliberately, because a nominally strict 5% gate on this
+statistics was a 43% chance of a spurious failure.
 
-Measured on CPU, 2026-08-01, reproduced by
-`scripts/validate.py --dims 1 --attractive --markdown`. 32 chains and 8e5 steps
-for the bulk cases, 48 chains and 7.5e5 for the contact case.
+Every `d = 1` row above is bit-identical to the same case run on CPU: same
+seeds, same means, same ESS, same digits. That is worth more than it looks, since
+it says the batching and the reductions are not quietly device-dependent.
 
-The bulk rows are tighter than the hard-rod row above them, and the reason is
-sampling rather than physics: they run 32 chains of 6e5 steps against that row's
-16 of 2e5, for an ESS of 28k to 38k against 6.3k, in a longer box and at lower
-density. Do not read them as evidence that an attractive fluid is easier to
-sample than a hard one. The contact row is looser than either because
-extrapolating a quadratic through three bins to `z = 0+` amplifies bin noise,
-exactly as it does for hard rods, and it carries the same 12% gate for the same
-reason.
+The `d = 3` row is the one to read carefully. Its ESS is 1670 of 128000 draws,
+because N in a dense three-dimensional fluid decorrelates over roughly 70 draws
+and the insertion acceptance there is 0.8%. The density is right to 0.14% but it
+is the least-converged number in the table, and its R-hat of 1.016 says so.
 
 The rest of the `slow` tier is not tabulated: the compressibility identities in
 all three dimensions, S(0) by both routes, the local response integrating back

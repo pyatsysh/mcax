@@ -188,6 +188,70 @@ def contact_density(d, rho):
     return p_of_rho(d, rho)
 
 
+# ---- the zero-dimensional limit ------------------------------------------- #
+#
+# Not a fourth dimension: d = 0 has no positions to sample. It is a CAVITY too
+# small to hold two particles, and it matters far more than that sounds, because
+# it is the limit fundamental measure theory is built to reproduce. Rosenfeld's
+# functional is constructed so that dimensional crossover, confining a 3-D fluid
+# into a cavity narrower than sigma, returns the 0-D answer exactly. So it is
+# the sharpest of all the dimensional reductions, and it is the one a functional
+# most often gets wrong.
+#
+# The whole of it is two states. The grand partition function of a cavity of
+# accessible volume V admitting at most one centre is Xi = 1 + zV, since every
+# N >= 2 term vanishes on the overlap. Everything below follows from that one
+# line, and every quantity is EXACT with no approximation anywhere.
+#
+# mcax reaches this limit through geometry rather than through `d`: a spherical
+# pore of radius R < sigma/2 admits at most one centre in ANY dimension, because
+# two centres inside it are at most 2R apart. `geometry.is_zero_dimensional`
+# tests for it.
+
+
+def eta_0d(z, vol):
+    """Mean occupancy of a one-particle cavity: eta = zV/(1 + zV).
+
+    Saturates at 1 however large the activity, which is the whole character of
+    the limit and the first thing to check a sampler against.
+    """
+    zv = onp.asarray(z, dtype = float) * vol
+    return zv / (1.0 + zv)
+
+
+def f_ex_0d(eta):
+    """The exact 0-D excess free energy, beta F_ex = eta + (1-eta) ln(1-eta).
+
+    This is the function FMT has to reproduce under dimensional crossover, and
+    the reason the Rosenfeld functional has the log term it does. It rises from
+    0 at an empty cavity to 1 at a full one.
+    """
+    eta = onp.asarray(eta, dtype = float)
+    return eta + (1.0 - eta) * onp.log1p(-eta)
+
+
+def mu_ex_0d(eta):
+    """beta mu_ex = -ln(1 - eta), which is d(f_ex_0d)/d(eta).
+
+    Recoverable from a run without differentiating anything: measure eta, and
+    the excess chemical potential follows. That is the cheapest check that a
+    confined sampler is in the 0-D limit rather than merely near it.
+    """
+    return -onp.log1p(-onp.asarray(eta, dtype = float))
+
+
+def var_n_0d(eta):
+    """Var(N) = eta (1 - eta): the occupancy is a Bernoulli variable.
+
+    N is 0 or 1 and nothing else, so its variance is fixed by its mean with no
+    freedom left. Together with `eta_0d` this pins both the first and second
+    moments of a 0-D run exactly, and the second is the sharper test because
+    the fluctuation estimators have to be right for it to come out.
+    """
+    eta = onp.asarray(eta, dtype = float)
+    return eta * (1.0 - eta)
+
+
 # ---- the attractive razor: 1-D square well, exactly ----------------------- #
 #
 # Everything above is hard-particle only, and only d = 1 of it is exact. Turning

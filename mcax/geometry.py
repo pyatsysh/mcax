@@ -155,6 +155,34 @@ def bin_volume(spec, nbins):
             * spec.Lperp ** (d - 2))
 
 
+def max_separation(spec):
+    """Largest centre-to-centre distance the region admits, or inf.
+
+    Finite only where every axis is bounded and short. Returned as inf wherever
+    an axis is periodic or extended, since two centres can then be arbitrarily
+    far apart (or, under the minimum image, as far as half the period).
+    """
+    if spec.geom == "sphere":
+        return 2.0 * spec.H                     # antipodes of the ball
+    if spec.geom == "slit" and spec.d == 1:
+        return spec.H                           # the two walls
+    return float("inf")
+
+
+def is_zero_dimensional(spec):
+    """True if the region cannot hold two particles at once.
+
+    The 0-D limit of fundamental measure theory, reached through geometry
+    rather than through `d`: see the note in `mcax.eos`. A spherical pore of
+    radius below sigma/2 qualifies in any dimension, and so does a
+    one-dimensional slit narrower than sigma.
+
+    Strict, not `<=`: at exactly 2R = sigma two centres sit at contact, which
+    the overlap test allows, and the cavity would hold two.
+    """
+    return max_separation(spec) < spec.sigma
+
+
 def extent(spec):
     """Upper end of the profile coordinate."""
     if spec.geom == "sphere":
