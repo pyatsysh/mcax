@@ -87,12 +87,90 @@ diagnostics, and the final `state` so a run can be continued.
 
 ### Geometry and conventions
 
-`slit = True` puts hard walls on particle **centres** at `x_d = 0` and `H`, with
-the transverse axes periodic. That is the centre-exclusion convention the DFT
-reference data uses, which is what makes the contact theorem `rho(0+) = beta P`
-apply literally rather than at a profile shifted by `sigma/2`. `slit = False` is
-periodic everywhere. Lengths are in units of `sigma`, with `beta = 1` and
-`Lambda = 1`.
+Five confinements, selected with `geom`:
+
+| `geom` | what it is | `H` | `Lperp` |
+|---|---|---|---|
+| `bulk` | periodic everywhere | box edge | transverse edge |
+| `slit` | hard walls on centres at 0 and `H` | wall separation | transverse edge |
+| `sphere` | spherical pore, `d = 1, 2, 3` | **radius** | . |
+| `cylinder` | cylindrical pore, `d >= 2` | axial period | **radius** |
+| `wedge` | two walls meeting at `psi`, `d >= 2` | height above the apex | periodic edge |
+
+`geometry.describe(spec)` prints that row back for a given spec, which is
+quicker than counting axes. `slit = True/False` still selects `slit` or `bulk`.
+
+Walls act on particle **centres** in every geometry, never on surfaces. That is
+the centre-exclusion convention the DFT reference data uses, and it is what makes
+the contact theorem `rho(0+) = beta P` apply literally rather than at a profile
+shifted by `sigma/2`. Note the two places it does not apply: against a curved
+wall, where curvature contributes at order `sigma/R`, and under an attractive
+external field, where the general sum rule picks up an integral of
+`rho grad V_ext`.
+
+The density profile is binned along the wall axis in a slit or a wedge and along
+the **radius** in a sphere or a cylinder, so `res.z` is a radius for the curved
+pores and `res.rho` is normalised by that geometry's own shell volumes.
+
+Lengths are in units of `sigma`, with `beta = 1` and `Lambda = 1`. Every energy
+is therefore a `beta epsilon`, and temperature enters only through them.
+
+### External fields and attractions
+
+An external field and an attractive pair tail each multiply the acceptances by
+the obvious Boltzmann factor and change nothing else:
+
+```python
+from mcax import fields, potentials
+
+spec = make_spec(d = 3, H = 12.0, z_act = ...,
+                 field = fields.both_walls(fields.LJ93Wall(eps = 1.2), 12.0),
+                 pair  = potentials.SquareWell(eps = 1.0, lam = 1.5))
+```
+
+`mcax.fields` carries gravity, a harmonic trap, an isotropic trap, the 9-3
+Lennard-Jones wall, a square-well wall and an exponential wall, with `Sum` and
+`Mirror` to compose them. `mcax.potentials` carries the tails a mean-field
+classical DFT actually models: a square well, a hard-core Yukawa, and
+Lennard-Jones split by Weeks-Chandler-Andersen or by Barker-Henderson. Simulating
+exactly the `w(r)` a functional assumes is the point: the discrepancy is then the
+mean-field approximation itself and not a mismatch of Hamiltonians.
+`potentials.mean_field_integral` gives the `int w d^d r` the functional consumes,
+so both sides can be checked to be using the same number.
+
+**mcax does not sample phase coexistence.** Below `T_c` the distribution of `N`
+is bimodal with a barrier that grows with system size, and a plain muVT chain
+does not cross it: it sticks in one phase and reports a converged-looking mean
+that is wrong. Split R-hat does not reliably catch this either, because every
+chain can stick in the same phase. There is no reweighting or umbrella sampling
+here. Stay supercritical or dilute, and watch the `N` histogram.
+
+### Response functions
+
+The sampler cannot be differentiated (see [below](#what-it-will-not-do)), but in
+the grand ensemble a derivative with respect to `beta mu` **is** a covariance
+with the particle number, which is exact rather than approximate:
+
+```python
+from mcax import observables
+
+chi, err = observables.susceptibility(res.Ns)       # d<N>/d(beta mu) = Var(N)
+kappa, _ = observables.compressibility(res.Ns)      # Var(N)/<N> = rho kT chi_T
+z, dr, _ = observables.response_profile(spec, res)  # d rho(z)/d(beta mu)
+r, g, _  = observables.pair_correlation(spec, res)  # needs nbins_g > 0, bulk only
+```
+
+These cost no extra sampling: they are estimators over draws already taken. The
+identity that ties them together,
+
+```
+Var(N)/<N>  =  [d(beta P)/d(rho)]^-1  =  rho kT chi_T  =  S(0)  =  1 + rho int [g(r) - 1] dr
+```
+
+is the most useful check in the library, because one number is reachable four
+ways and disagreement says which of them is wrong. `eos.compressibility(d, rho)`
+gives the exact value, and error bars come from the scatter across chains, which
+are independent by construction.
 
 ### The three moves
 
@@ -121,6 +199,30 @@ an exact number rather than against another simulation carrying its own errors.
 In two and three dimensions the best references available are accurate to about
 0.1%, so a marginal disagreement there is ambiguous between our bug and the
 reference equation. In one dimension it is a bug.
+
+Switching an attraction on would normally cost that guarantee, since there is no
+exact equation of state for an attractive fluid in three dimensions. It does not
+have to. In one dimension a square well of range `lam <= 2` reaches only nearest
+neighbours, because two particles that are not nearest neighbours are separated
+by at least two hard cores, and the one-dimensional fluid with nearest-neighbour
+interactions is exactly solvable by Takahashi's construction in the isobaric
+ensemble. `eos.sw1d_state` carries it, and `eps = 0` collapses it onto Tonks,
+which is the first thing the tests check. So `d = 1` remains a razor with
+attraction present, and the attractive engine is checked against an exact number
+rather than against somebody else's simulation.
+
+There is a second exact target in an unlikely place. Near the apex of a wedge the
+opening falls below `sigma`, and a channel narrower than `sigma` **is** a Tonks
+gas: two centres in it come into contact when their axial separation reaches
+`sigma`. So the line density there must equal the exact one-dimensional inversion
+evaluated at the local activity `z w(z)`. Measured 0.264 against 0.263. It is an
+asymptotic statement and the test says so: one bin further out, where the opening
+has widened to `0.62 sigma`, it is 23% off, which is the `(w/sigma)^2` that the
+quasi-one-dimensional reduction discards.
+
+Two tables below, with different provenance, and it is worth keeping them
+apart. The first is the hard-particle GPU run of 2026-07-26. The second is the
+attractive run of 2026-08-01, measured on CPU.
 
 | Case | Reference | Reference accuracy | Measured rel. error | split R-hat |
 |---|---|---|---|---|
@@ -167,6 +269,34 @@ reproduction from a seed.
 
 ![Hard rods at a wall against exact Tonks](docs/wall_profile.png)
 
+### With attraction switched on
+
+| Case | Reference | Reference accuracy | Measured rel. error | split R-hat |
+|---|---|---|---|---|
+| d = 1 bulk square well, beta eps = 0.5, lam = 1.5, rho = 0.30 | Takahashi | **exact** | 0.00002 | 1.000 |
+| d = 1 bulk square well, beta eps = 1.0, lam = 1.5, rho = 0.30 | Takahashi | **exact** | 0.0011 | 1.000 |
+| d = 1 bulk square well, beta eps = 1.0, lam = 1.5, rho = 0.45 | Takahashi | **exact** | 0.0002 | 1.000 |
+| d = 1 bulk square well, beta eps = 1.5, lam = 1.8, rho = 0.25 | Takahashi | **exact** | 0.0007 | 1.000 |
+| d = 1 slit contact, square well, rho = 0.35 | rho(0+) = beta P, exact Takahashi | **exact** | 0.0628 | 1.000 |
+
+Measured on CPU, 2026-08-01, reproduced by
+`scripts/validate.py --dims 1 --attractive --markdown`. 32 chains and 8e5 steps
+for the bulk cases, 48 chains and 7.5e5 for the contact case.
+
+The bulk rows are tighter than the hard-rod row above them, and the reason is
+sampling rather than physics: they run 32 chains of 6e5 steps against that row's
+16 of 2e5, for an ESS of 28k to 38k against 6.3k, in a longer box and at lower
+density. Do not read them as evidence that an attractive fluid is easier to
+sample than a hard one. The contact row is looser than either because
+extrapolating a quadratic through three bins to `z = 0+` amplifies bin noise,
+exactly as it does for hard rods, and it carries the same 12% gate for the same
+reason.
+
+The rest of the `slow` tier is not tabulated: the compressibility identities in
+all three dimensions, S(0) by both routes, the local response integrating back
+to Var(N), a disc pore recovering bulk in its middle, and the bin-averaged
+barometric law. All 17 cases pass (`pytest -m slow`, 74 minutes on CPU).
+
 ## Diagnostics
 
 `mcax.diagnostics` gives split R-hat, ESS by Stan's estimator with Geyer
@@ -210,7 +340,7 @@ grand-canonical state space is trans-dimensional. `jax.grad` of a profile with
 respect to `mu` or `sigma` is not unimplemented, it is undefined by this route.
 Response functions come from fluctuation identities instead, where the derivative
 with respect to `beta mu` is a sampled covariance, and that is the supported
-answer.
+answer. It is exact, not a fallback: see [Response functions](#response-functions).
 
 - **Fixed capacity.** A chain holds at most `Nmax` particles, and an insertion
   into a full chain is rejected. That is not a Metropolis rejection: it truncates
@@ -223,8 +353,11 @@ answer.
   thing that has to change for large boxes.
 - **Per-chain speed is not competitive.** A good single-chain C code beats it.
   The win is in the batch and in living inside JAX.
-- **Single-component spheres.** No mixtures, no aspherical shapes, no external
-  field beyond the hard walls.
+- **No phase coexistence.** With an attraction switched on the muVT distribution
+  of `N` is bimodal below `T_c` and this sampler will not cross the barrier. No
+  reweighting, no umbrella sampling, no finite-size scaling.
+- **Single-component.** No mixtures and no aspherical shapes. External fields and
+  attractive pair tails are supported; a second species is not.
 
 ## Licence
 

@@ -33,7 +33,8 @@ jax.config.update("jax_enable_x64", True)
 
 import numpy as onp
 
-from mcax import make_spec, burn_and_sample, summary, format_summary, eos
+from mcax import (make_spec, burn_and_sample, summary, format_summary,
+                  eos, potentials)
 
 # (d, eta, chains, n_burn, n_run, reference). The 3-D case costs 10x the others
 # because N decorrelates over ~70 draws there; see tests/test_validation.py.
@@ -48,6 +49,8 @@ p.add_argument("--dims", type = int, nargs = "+", default = [1, 2, 3],
                help = "which dimensions to run (default: all)")
 p.add_argument("--scale", type = float, default = 1.0,
                help = "multiply every step count (0.1 for a quick look)")
+p.add_argument("--attractive", action = "store_true",
+               help = "also run the square-well cases against Takahashi")
 p.add_argument("--markdown", action = "store_true",
                help = "also emit the README and site table rows")
 args = p.parse_args()
@@ -116,6 +119,68 @@ if 1 in args.dims:
     fails += s["split_rhat"] > 1.05
     rows.append(f"| d = 1 slit contact, eta = 0.5 | rho(0+) = beta P, exact "
                 f"Tonks | **exact** | {rel:.4f} | {s['split_rhat']:.3f} |")
+
+# The attractive cases. Takahashi's nearest-neighbour solution is exact for
+# lam <= 2, so these carry the same weight as the Tonks rows above: a failure is
+# a bug in the energy bookkeeping and not a reference equation's error bar.
+SW_CASES = [
+    (0.5, 1.5, 0.30, "sw-shallow"),
+    (1.0, 1.5, 0.30, "sw-standard"),
+    (1.0, 1.5, 0.45, "sw-dense"),
+    (1.5, 1.8, 0.25, "sw-deep-wide"),
+]
+
+if 1 in args.dims and args.attractive:
+    print("== d=1 square well: bulk density vs exact Takahashi ==")
+    for eps, lam, rho_t, label in SW_CASES:
+        spec = make_spec(1, H = 60.0, slit = False,
+                         z_act = eos.sw1d_z_of_rho(eps, lam, rho_t),
+                         pair = potentials.SquareWell(eps, lam))
+        t0 = time.time()
+        res = burn_and_sample(spec, C = 32, seed = 11,
+                              n_burn = int(200_000 * args.scale),
+                              n_run = max(int(600_000 * args.scale), 1000),
+                              thin = 500, nbins = 40,
+                              n0 = int(0.9 * rho_t * spec.H))
+        rho = res.n_mean / spec.H
+        rel = abs(rho - rho_t) / rho_t
+        s = summary(res.Ns)
+        print(f"eps={eps} lam={lam}: <rho>={rho:.5f} vs exact {rho_t:.5f} "
+              f"(rel {rel:.5f}) acc={onp.round(res.acc, 3)} "
+              f"[{time.time() - t0:.0f}s]")
+        print(f"    {format_summary(s)}")
+        if res.capacity_warning:
+            print(f"    !! {res.capacity_warning}")
+            fails += 1
+        fails += rel > 0.02
+        fails += s["split_rhat"] > 1.05
+        rows.append(f"| d = 1 bulk square well, beta eps = {eps}, "
+                    f"lam = {lam}, rho = {rho_t} | Takahashi | **exact** | "
+                    f"{rel:.4f} | {s['split_rhat']:.3f} |")
+
+    print("== d=1 slit square well: contact theorem with attraction ==")
+    eps, lam, rho_b = 1.0, 1.5, 0.35
+    P = eos.sw1d_p_of_rho(eps, lam, rho_b)
+    spec = make_spec(1, H = 10.0, slit = True,
+                     z_act = eos.sw1d_z_of_rho(eps, lam, rho_b),
+                     pair = potentials.SquareWell(eps, lam))
+    t0 = time.time()
+    res = burn_and_sample(spec, C = 48, seed = 13,
+                          n_burn = int(150_000 * args.scale),
+                          n_run = max(int(600_000 * args.scale), 1000),
+                          thin = 500, nbins = 200)
+    rho_sym = 0.5 * (res.rho + res.rho[::-1])
+    contact = onp.polyval(onp.polyfit(res.z[:3], rho_sym[:3], 2), 0.0)
+    rel = abs(contact - P) / P
+    s = summary(res.Ns)
+    print(f"contact rho(0+)={contact:.5f} vs beta P={P:.5f} (rel {rel:.5f}) "
+          f"[{time.time() - t0:.0f}s]")
+    print(f"    {format_summary(s)}")
+    fails += rel > 0.12
+    fails += s["split_rhat"] > 1.05
+    rows.append(f"| d = 1 slit contact, square well, rho = {rho_b} | "
+                f"rho(0+) = beta P, exact Takahashi | **exact** | "
+                f"{rel:.4f} | {s['split_rhat']:.3f} |")
 
 if args.markdown:
     print("\n== table rows ==")

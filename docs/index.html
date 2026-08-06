@@ -86,6 +86,7 @@ footer a{color:var(--muted)}
 <div class="bar"><div class="in">
   <span class="mark">mcax</span>
   <a href="#why">Why JAX</a>
+  <a href="#beyond">Beyond hard particles</a>
   <a href="#validation">Validation</a>
   <a href="#limits">Limits</a>
   <a href="https://github.com/pyatsysh/mcax">GitHub</a>
@@ -179,6 +180,41 @@ assert res.capacity_warning is None
 res.z, res.rho                             # the density profile</code></pre>
   </div>
 
+  <div class="card" id="beyond">
+    <h2>Beyond hard particles</h2>
+    <p>The engine started as hard cores in a slit. It now confines them five
+    ways, puts an arbitrary one-body field on them, and gives them the
+    attraction a density functional actually models.</p>
+    <ul>
+      <li><b>Five geometries.</b> Bulk, slit, a spherical pore, a cylindrical
+      pore, and a wedge. Walls act on particle centres in every one of them,
+      the convention the reference data uses. Profiles are binned along the
+      radius in the curved pores and normalised by that pore's own shell
+      volumes, because dividing a spherical shell by a flat slab tilts the
+      profile in a way that reads convincingly like packing.</li>
+      <li><b>External fields.</b> Gravity, traps, a nine-three wall, a
+      square-well wall, composed with each other and mirrored onto the far
+      side of a slit. Switch the core off and the density is exactly
+      <code>z exp(-beta V)</code> everywhere, which is a check needing no
+      reference data at all.</li>
+      <li><b>Attractions, the ones cDFT assumes.</b> A square well, a hard-core
+      Yukawa, and Lennard-Jones split by Weeks-Chandler-Andersen or by
+      Barker-Henderson. Simulating exactly the tail a functional assumes is the
+      point: what is then left over is the mean-field approximation itself
+      rather than a mismatch of Hamiltonians.</li>
+      <li><b>Response functions.</b> The sampler cannot be differentiated and
+      never will be. In the grand ensemble a derivative with respect to
+      <code>beta mu</code> is a covariance with the particle number, which is
+      exact rather than a fallback, and it costs no extra sampling.</li>
+    </ul>
+    <p>Two limits stated plainly, because both invite a wrong inference. A
+    curved wall breaks the contact theorem at order <code>sigma/R</code>, and
+    an attractive external field breaks it outright. And an attraction brings a
+    liquid-vapour transition that this sampler cannot cross: below the critical
+    temperature it sticks in one phase and reports a converged-looking mean
+    that is wrong. Supercritical or dilute, for now.</p>
+  </div>
+
   <div class="card" id="validation">
     <h2>How far the numbers can be trusted</h2>
     <p>The one-dimensional case is kept deliberately, and it is the reason to
@@ -190,6 +226,18 @@ res.z, res.rho                             # the density profile</code></pre>
     dimensions the best references available are accurate to about a tenth of a
     percent, so a marginal disagreement is ambiguous. In one dimension it is a
     bug.</p>
+
+    <p>Attraction would normally cost that guarantee, and it does not have to.
+    In one dimension a square well narrower than two diameters reaches only
+    nearest neighbours, and that fluid is exactly solvable by Takahashi's
+    construction. So the attractive engine is checked against an exact number
+    too, and setting the well depth to zero collapses the solution back onto
+    Tonks. There is a second exact target in an unlikelier place: near the apex
+    of a wedge the opening falls below a diameter, and a channel that narrow is
+    itself a Tonks gas. Measured 0.264 there against 0.263 exactly.</p>
+
+    <p>Two runs below, kept apart because their provenance differs: the first
+    is the hard-particle run on a GPU, the second the attractive run on CPU.</p>
 
     <div class="scroll">
     <table>
@@ -207,6 +255,33 @@ res.z, res.rho                             # the density profile</code></pre>
 
     <p class="eyebrow" style="margin-top:-.4rem">Measured on one GPU, 26 July 2026,
     reproduced by <code>scripts/validate.py --markdown</code></p>
+
+    <h3>With attraction switched on</h3>
+    <div class="scroll">
+    <table>
+      <tr><th>Case</th><th>Reference</th><th>Reference accuracy</th><th>Measured rel. error</th><th>split R-hat</th></tr>
+      <tr><td>d = 1 bulk square well, &beta;&epsilon; = 0.5, &lambda; = 1.5, &rho; = 0.30</td>
+          <td>Takahashi</td><td class="exact">exact</td><td class="num">0.00002</td><td class="num">1.000</td></tr>
+      <tr><td>d = 1 bulk square well, &beta;&epsilon; = 1.0, &lambda; = 1.5, &rho; = 0.30</td>
+          <td>Takahashi</td><td class="exact">exact</td><td class="num">0.0011</td><td class="num">1.000</td></tr>
+      <tr><td>d = 1 bulk square well, &beta;&epsilon; = 1.0, &lambda; = 1.5, &rho; = 0.45</td>
+          <td>Takahashi</td><td class="exact">exact</td><td class="num">0.0002</td><td class="num">1.000</td></tr>
+      <tr><td>d = 1 bulk square well, &beta;&epsilon; = 1.5, &lambda; = 1.8, &rho; = 0.25</td>
+          <td>Takahashi</td><td class="exact">exact</td><td class="num">0.0007</td><td class="num">1.000</td></tr>
+      <tr><td>d = 1 wall contact, square well, &rho; = 0.35</td>
+          <td>&rho;(0+) = &beta;P, exact Takahashi</td><td class="exact">exact</td><td class="num">0.0628</td><td class="num">1.000</td></tr>
+    </table>
+    </div>
+
+    <p class="eyebrow" style="margin-top:-.4rem">Measured on CPU, 1 August 2026,
+    reproduced by <code>scripts/validate.py --dims 1 --attractive --markdown</code></p>
+
+    <p>The bulk rows come out tighter than the hard-rod row above them, and that
+    is sampling rather than physics: they run 32 chains of 600 thousand steps
+    against that row's 16 of 200 thousand, in a longer box and at lower density.
+    The contact row is looser than either, because extrapolating a quadratic
+    through three bins down to the wall amplifies bin noise, exactly as it does
+    without attraction.</p>
 
     <p>Every case asserts split R-hat alongside the density, and that is not
     decoration. On the first full run the three-dimensional case matched
@@ -254,14 +329,17 @@ res.z, res.rho                             # the density profile</code></pre>
       every live particle, with no cell list. Comfortable to a few hundred
       particles per chain, and the first thing that has to change for large
       boxes.</li>
+      <li><b>No phase coexistence.</b> With an attraction switched on the
+      distribution of the particle number is bimodal below the critical
+      temperature, and this sampler will not cross the barrier between the two
+      phases. There is no reweighting and no umbrella sampling here.</li>
       <li><b>Per-chain speed is not competitive.</b> Three move branches are
       computed every step and two are thrown away, which keeps the batch free of
       divergence at the cost of roughly three times the arithmetic. A good
       single-chain C code beats it. The win is in the batch and in living inside
       JAX, and pretending otherwise would only disappoint the people who need
       HPMC.</li>
-      <li><b>Single-component spheres.</b> No mixtures, no aspherical shapes, no
-      external field beyond the hard walls.</li>
+      <li><b>Single-component.</b> No mixtures and no aspherical shapes. External fields and attractive pair tails are supported; a second species is not.</li>
     </ul>
   </div>
 
