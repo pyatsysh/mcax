@@ -11,11 +11,14 @@ INDICATOR: 1 if no pair overlaps, 0 otherwise, and the exact acceptances follow:
     insertion    : accept with min(1, z V / (N+1)) iff no overlap
     deletion     : accept with min(1, N / (z V))
 
-An external field beta V_ext(r) multiplies each of these by the obvious
-Boltzmann factor (exp(-[V' - V]) displacing, exp(-V) inserting, exp(+V)
-deleting) and changes nothing else: the overlap test is still an indicator and
-the geometry is still hard. With `field = None` the factors are exactly one and
-the arithmetic below is the pure hard-particle path. See `mcax.fields`.
+An external field beta V_ext(r) and an attractive pair tail beta w(r) each
+multiply these by the obvious Boltzmann factor (exp(-Delta U) displacing,
+exp(-U) inserting, exp(+U) deleting) and change nothing else: the core is still
+an indicator and the geometry is still hard. With both set to None the factors
+are exactly one and the arithmetic below is the pure hard-particle path. The
+tail is summed in the SAME masked sweep as the overlap test, since it needs
+exactly the separations that test already computed. See `mcax.fields` and
+`mcax.potentials`.
 
 Design: many independent chains in lockstep on one device. A chain is a
 fixed-capacity particle set (positions (Nmax, d) plus an alive mask); every MC
@@ -45,6 +48,7 @@ import jax.numpy as np
 
 from . import fields
 from . import geometry
+from . import potentials
 
 
 def require_float64():
@@ -83,6 +87,7 @@ class MCSpec(NamedTuple):
     p_disp: float      # move mix: displacement prob (rest split ins/del)
     psi: float         # wedge opening half-angle, radians; ignored otherwise
     field: object      # beta V_ext(r) callable, or None. See `mcax.fields`
+    pair: object       # beta w(r2, sigma) tail, or None. See `mcax.potentials`
 
     @property
     def slit(self):
@@ -93,7 +98,7 @@ class MCSpec(NamedTuple):
 
 def make_spec(d, H, z_act, Lperp = 10.0, sigma = 1.0, Nmax = None, dmax = 0.15,
               slit = None, p_disp = 0.5, geom = None, psi = onp.pi / 6.0,
-              field = None):
+              field = None, pair = None):
     """Build the static description of a state point.
 
     E.G. hard spheres at bulk packing fraction eta = 0.3 in a slit 8 diameters
@@ -128,7 +133,7 @@ def make_spec(d, H, z_act, Lperp = 10.0, sigma = 1.0, Nmax = None, dmax = 0.15,
 
     spec = MCSpec(int(d), 0, float(H), float(Lperp), float(sigma),
                   float(z_act), float(dmax), str(geom), float(p_disp),
-                  float(psi), field)
+                  float(psi), field, pair)
     if Nmax is None:
         # dense-limit headroom: eta_max ~ 0.75 in any d at sigma = 1. Sized on
         # the ACCESSIBLE volume, so a spherical pore is not handed the capacity
@@ -262,17 +267,25 @@ def _dist2(spec, a, b):
     return np.sum(geometry.min_image(spec, a - b) ** 2, axis = -1)
 
 
-def _overlaps_any(spec, pos, alive, trial, skip_idx):
-    """True if `trial` overlaps any alive particle (excluding skip_idx).
+def _neighbour_scan(spec, pos, alive, trial, skip_idx):
+    """(overlaps, pair energy) of `trial` against every alive particle.
+
+    Both answers come out of ONE sweep of the distance array, because the
+    attractive tail needs exactly the separations the overlap test already
+    computed. So switching a tail on costs an extra masked sum per sweep and
+    not an extra sweep.
 
     Pass `skip_idx = spec.Nmax` to skip nobody: an out-of-bounds scatter is
     dropped by JAX, whereas -1 would wrap round and silently mask the LAST
     capacity slot, which holds a real particle in a nearly-full chain.
     """
     d2 = _dist2(spec, pos, trial[None, :])
-    ok = (d2 >= spec.sigma ** 2) | ~alive
-    ok = ok.at[skip_idx].set(True)
-    return ~np.all(ok)
+    live = alive.at[skip_idx].set(False)
+    overlap = np.any(live & (d2 < spec.sigma ** 2))
+    if spec.pair is None:
+        return overlap, np.asarray(0.0)
+    u = potentials.evaluate(spec.pair, d2, spec.sigma)
+    return overlap, np.sum(np.where(live, u, 0.0))
 
 
 def _pick_alive(key, alive):
@@ -300,31 +313,38 @@ def _step_chain(spec, carry, _):
     delta = spec.dmax * jax.random.uniform(k_move, (spec.d,), minval = -1.0,
                                            maxval = 1.0)
     trial_d = geometry.wrap(spec, pos[idx] + delta)
-    # One-body energies. With no field these are exact zeros and every
-    # exponential below collapses to 1, so the hard-particle path is unchanged.
+    # One- and two-body energies. With neither a field nor a tail these are all
+    # exact zeros and every exponential below collapses to 1, so the
+    # hard-particle path is arithmetically unchanged.
     v_old = fields.evaluate(spec.field, pos[idx])
     v_new = fields.evaluate(spec.field, trial_d)
-    disp_ok = alive[idx] & geometry.contains(spec, trial_d) & \
-        (jax.random.uniform(k_acc) < np.exp(-(v_new - v_old))) & \
-        ~_overlaps_any(spec, pos, alive, trial_d, idx)
+    # The energy of the chosen particle where it currently sits. Shared between
+    # the displacement and deletion branches, so a tail costs one extra sweep
+    # per step rather than two, and none at all when there is no tail.
+    u_old = np.asarray(0.0) if spec.pair is None else \
+        _neighbour_scan(spec, pos, alive, pos[idx], idx)[1]
+    over_d, u_new = _neighbour_scan(spec, pos, alive, trial_d, idx)
+    disp_ok = alive[idx] & geometry.contains(spec, trial_d) & ~over_d & \
+        (jax.random.uniform(k_acc) < np.exp(-(v_new - v_old) - (u_new - u_old)))
     pos_disp = pos.at[idx].set(np.where(disp_ok, trial_d, pos[idx]))
 
     # -- insertion branch --------------------------------------------------- #
     slot = np.argmax(~alive)                        # first free slot
     has_slot = ~np.all(alive)
     new = jax.random.uniform(k_move, (spec.d,), minval = lo, maxval = hi)
-    a_ins = spec.z_act * V / (N + 1.0) * np.exp(-fields.evaluate(spec.field, new))
-    ins_ok = has_slot & geometry.contains(spec, new) & \
-        (jax.random.uniform(k_acc) < np.minimum(1.0, a_ins)) & \
-        ~_overlaps_any(spec, pos, alive, new, spec.Nmax)
+    over_i, u_ins = _neighbour_scan(spec, pos, alive, new, spec.Nmax)
+    a_ins = spec.z_act * V / (N + 1.0) * \
+        np.exp(-fields.evaluate(spec.field, new) - u_ins)
+    ins_ok = has_slot & geometry.contains(spec, new) & ~over_i & \
+        (jax.random.uniform(k_acc) < np.minimum(1.0, a_ins))
     pos_ins = pos.at[slot].set(np.where(ins_ok, new, pos[slot]))
     alive_ins = alive.at[slot].set(np.where(ins_ok, True, alive[slot]))
 
     # -- deletion branch ---------------------------------------------------- #
-    # The +v_old: removing a particle from a deep well costs its binding energy,
-    # so a bound layer is hard to strip. Sign errors here are invisible in the
-    # mean density and obvious in the profile.
-    a_del = N / np.maximum(spec.z_act * V, 1e-300) * np.exp(v_old)
+    # The PLUS signs: removing a particle from a deep well costs its binding
+    # energy, so a bound layer is hard to strip. A sign error here is invisible
+    # in the mean density and obvious in the profile.
+    a_del = N / np.maximum(spec.z_act * V, 1e-300) * np.exp(v_old + u_old)
     del_ok = (N > 0) & (jax.random.uniform(k_acc) < np.minimum(1.0, a_del))
     alive_del = alive.at[idx].set(np.where(del_ok, False, alive[idx]))
 

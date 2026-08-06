@@ -9,5 +9,6 @@ from . import eos
 from . import fields
 from . import geometry
 from . import observables
+from . import potentials
 
 __version__ = "0.1.0"

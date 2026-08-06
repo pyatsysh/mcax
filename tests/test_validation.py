@@ -28,7 +28,8 @@ is what notices.
 import numpy as onp
 import pytest
 
-from mcax import make_spec, burn_and_sample, summary, eos
+from mcax import (make_spec, burn_and_sample, summary, eos, geometry,
+                  observables, potentials, fields)
 
 pytestmark = pytest.mark.slow
 
@@ -113,3 +114,169 @@ def test_slit_interior_recovers_the_bulk_density_rods():
     assert res.capacity_warning is None, res.capacity_warning
     mid = res.rho[len(res.rho) // 2 - 10:len(res.rho) // 2 + 10].mean()
     assert mid == pytest.approx(rho_b, rel = 0.05), f"interior {mid:.4f}"
+
+
+# ---- attraction: the razor survives, because d = 1 is still exact --------- #
+
+SW_CASES = [
+    (0.5, 1.5, 0.30, "sw-shallow"),
+    (1.0, 1.5, 0.30, "sw-standard"),
+    (1.0, 1.5, 0.45, "sw-dense"),
+    (1.5, 1.8, 0.25, "sw-deep-wide"),
+]
+
+
+@pytest.mark.parametrize("eps,lam,rho_target,label", SW_CASES,
+                         ids = [c[-1] for c in SW_CASES])
+def test_square_well_rods_against_takahashi(eps, lam, rho_target, label):
+    """Measured <rho> against the EXACT 1-D square-well equation of state.
+
+    This is the attractive counterpart of `test_bulk_equation_of_state` at
+    d = 1, and it carries the same weight: Takahashi's nearest-neighbour
+    solution is exact for lam <= 2, so a failure here is a bug in the energy
+    bookkeeping and nothing else. No literature value, no error bar but ours.
+    """
+    z_act = eos.sw1d_z_of_rho(eps, lam, rho_target)
+    spec = make_spec(1, H = 60.0, z_act = z_act, slit = False,
+                     pair = potentials.SquareWell(eps, lam))
+    n0 = int(0.9 * rho_target * spec.H)
+    res = burn_and_sample(spec, C = 32, seed = 11, n_burn = 200_000,
+                          n_run = 600_000, thin = 500, nbins = 40, n0 = n0)
+
+    assert res.capacity_warning is None, res.capacity_warning
+    s = summary(res.Ns, "N")
+    assert s["split_rhat"] < 1.05, f"chains not mixed: R-hat {s['split_rhat']:.3f}"
+    rho = res.n_mean / spec.H
+    rel = abs(rho - rho_target) / rho_target
+    assert rel < 0.02, (f"{label}: rho {rho:.4f} vs exact {rho_target:.4f} "
+                        f"(rel {rel:.4f}), acc {onp.round(res.acc, 3)}")
+
+
+def test_square_well_contact_theorem_rods():
+    """rho(0+) = beta P against a hard wall, with attraction switched on.
+
+    The sum rule constrains the WALL, not the fluid, so it survives an
+    interparticle attraction untouched. That makes it an independent check on
+    the attractive engine: the density comes from the profile's edge and the
+    pressure from the exact solution, and nothing connects them but the physics
+    being right.
+    """
+    eps, lam, rho_b = 1.0, 1.5, 0.35
+    z_act = eos.sw1d_z_of_rho(eps, lam, rho_b)
+    P = eos.sw1d_p_of_rho(eps, lam, rho_b)
+    spec = make_spec(1, H = 10.0, z_act = z_act, slit = True,
+                     pair = potentials.SquareWell(eps, lam))
+    res = burn_and_sample(spec, C = 48, seed = 13, n_burn = 150_000,
+                          n_run = 600_000, thin = 500, nbins = 200)
+
+    assert res.capacity_warning is None, res.capacity_warning
+    rho_sym = 0.5 * (res.rho + res.rho[::-1])
+    contact = onp.polyval(onp.polyfit(res.z[:3], rho_sym[:3], 2), 0.0)
+    rel = abs(contact - P) / P
+    assert rel < 0.12, f"contact {contact:.4f} vs beta P {P:.4f} (rel {rel:.4f})"
+
+
+# ---- the fluctuation identities, at precision ---------------------------- #
+
+@pytest.mark.parametrize("d,eta", [(1, 0.4), (2, 0.35), (3, 0.25)])
+def test_compressibility_against_the_equation_of_state(d, eta):
+    """Var(N)/<N> = [d(beta P)/d(rho)]^{-1}, exact for rods.
+
+    A variance is a much noisier estimator than a mean, so this needs the long
+    runs; that is the whole reason it lives out here rather than in the fast
+    tier, where the same check runs at 20%.
+    """
+    rho = eta / eos.B[d]
+    L = {1: 60.0, 2: 14.0, 3: 8.0}[d]
+    spec = make_spec(d, H = L, Lperp = L, z_act = float(eos.z_of_rho(d, rho)),
+                     slit = False)
+    V = geometry.volume(spec)
+    res = burn_and_sample(spec, C = 32, seed = 17, n_burn = 200_000,
+                          n_run = 800_000, thin = 500, nbins = 20,
+                          n0 = int(0.9 * rho * V))
+
+    assert res.capacity_warning is None, res.capacity_warning
+    kappa, err = observables.compressibility(res.Ns)
+    exact = float(eos.compressibility(d, rho))
+    assert kappa == pytest.approx(exact, rel = 0.06), (
+        f"d = {d}: measured {kappa:.4f} +/- {err:.4f} against {exact:.4f}")
+
+
+def test_structure_factor_two_ways_rods():
+    """S(0) from the pair correlations against S(0) from the number variance.
+
+    In one dimension the shells tile the minimum-image cell, so with
+    rmax = L/2 these are the same number algebraically and the tolerance can be
+    tight. It is the check that caught the canonical g(r) normalisation.
+    """
+    rho = 0.4
+    spec = make_spec(1, H = 40.0, z_act = float(eos.z_of_rho(1, rho)),
+                     slit = False)
+    res = burn_and_sample(spec, C = 32, seed = 19, n_burn = 100_000,
+                          n_run = 400_000, thin = 500, nbins = 20,
+                          nbins_g = 200, n0 = int(0.9 * rho * spec.H))
+
+    s0_pairs = observables.structure_factor_zero(spec, res, rho)
+    s0_number, _ = observables.compressibility(res.Ns)
+    exact = float(eos.compressibility(1, rho))
+    assert s0_number == pytest.approx(exact, rel = 0.06)
+    assert s0_pairs == pytest.approx(s0_number, rel = 0.03), (
+        f"S(0) from g(r) {s0_pairs:.4f} against Var(N)/<N> {s0_number:.4f}")
+
+
+def test_local_response_integrates_to_the_susceptibility_rods():
+    """int d rho(z)/d(beta mu) dV = Var(N), and Var(N) matches the exact
+    compressibility. The first half is algebra and holds to roundoff; the
+    second is physics and needs the statistics."""
+    rho = 0.4
+    spec = make_spec(1, H = 20.0, z_act = float(eos.z_of_rho(1, rho)),
+                     slit = True)
+    res = burn_and_sample(spec, C = 32, seed = 23, n_burn = 100_000,
+                          n_run = 400_000, thin = 500, nbins = 40)
+    z, chi, err = observables.response_profile(spec, res)
+    cell = geometry.bin_volume(spec, len(z))
+    assert float((chi * cell).sum()) == pytest.approx(
+        float(res.Ns.var(axis = 1, ddof = 0).mean()), rel = 1e-9)
+
+
+# ---- the curved pores ---------------------------------------------------- #
+
+def test_disc_pore_interior_recovers_the_bulk_density():
+    """Deep inside a wide circular pore the fluid must forget the wall.
+
+    The radial bin volumes are what make this work: get them wrong and the
+    interior tilts, which is exactly the failure a flat profile would hide.
+    """
+    eta, R = 0.3, 8.0
+    rho_b = eta / eos.B[2]
+    spec = make_spec(2, geom = "sphere", H = R,
+                     z_act = float(eos.z_of_rho(2, rho_b)))
+    res = burn_and_sample(spec, C = 32, seed = 29, n_burn = 200_000,
+                          n_run = 600_000, thin = 500, nbins = 40,
+                          n0 = int(0.9 * rho_b * geometry.volume(spec)))
+
+    assert res.capacity_warning is None, res.capacity_warning
+    # bins 2 to 20 of 40 span r/R in [0.05, 0.5], three diameters clear of the
+    # wall and past the innermost shells where the volume is tiny and noisy.
+    mid = res.rho[2:20].mean()
+    assert mid == pytest.approx(rho_b, rel = 0.06), (
+        f"interior {mid:.4f} against bulk {rho_b:.4f}")
+
+
+def test_barometric_law_at_precision():
+    """rho(z) = z exp(-g z) for an ideal gas under gravity, bin-averaged.
+
+    Exact, so this is only limited by statistics and by the bin average, and it
+    is the sharpest test the external-field path has.
+    """
+    g, H, nbins = 0.5, 10.0, 20
+    spec = make_spec(1, H = H, z_act = 1.0, sigma = 1e-6, slit = True,
+                     Nmax = 128, field = fields.Gravity(g))
+    res = burn_and_sample(spec, C = 48, seed = 31, n_burn = 50_000,
+                          n_run = 400_000, thin = 200, nbins = nbins)
+
+    edges = onp.linspace(0.0, H, nbins + 1)
+    want = spec.z_act * (onp.exp(-g * edges[:-1]) - onp.exp(-g * edges[1:])) \
+        / (g * (edges[1] - edges[0]))
+    rel = onp.abs(res.rho - want) / want
+    assert rel.max() < 0.05, f"worst bin {rel.max():.4f}\n{res.rho}\n{want}"
