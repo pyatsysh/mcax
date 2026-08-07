@@ -1,15 +1,18 @@
 # mcax
 
 Batched hard-particle **grand-canonical Monte Carlo in JAX**: hard rods, discs
-and spheres in bulk and in slit confinement, many independent chains advanced in
-lockstep on one device, everything jit and scan compiled.
+and spheres in bulk, slit, spherical, cylindrical and wedge confinement, with
+optional external fields and attractive pair tails, many independent chains
+advanced in lockstep on one device, everything jit and scan compiled.
 
 Documentation and the longer argument: **https://pyatsysh.github.io/mcax/**
 
-Hard cores mean there are no energies anywhere in the code. The Boltzmann factor
-is an indicator function, so an overlap test plus three exact acceptances are the
-whole of the physics, which is what keeps the engine small enough to audit line
-by line.
+The core model has no energies in it. The hard-core Boltzmann factor is an
+indicator function, so an overlap test plus three exact acceptances are the
+whole of it, which is what keeps the engine small enough to audit line by line.
+Energies enter only through the optional field and tail, as plain Boltzmann
+factors on the same three moves, and switching both off recovers the
+hard-particle path bit for bit.
 
 ## Why an accelerator changes Monte Carlo
 

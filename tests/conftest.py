@@ -45,6 +45,8 @@ def periodic_axes(spec):
     if spec.geom == "slit":
         return (onp.array([spec.Lperp] * (d - 1) + [1.0]),
                 onp.array([True] * (d - 1) + [False]))
+    if spec.geom == "box":
+        return onp.ones(d), onp.zeros(d, bool)
     if spec.geom == "sphere":
         return onp.ones(d), onp.zeros(d, bool)
     if spec.geom == "cylinder":
@@ -84,6 +86,9 @@ def inside_region(spec, pts: onp.ndarray) -> onp.ndarray:
         return onp.ones(len(pts), bool)
     if spec.geom == "slit":
         return (pts[:, -1] >= -1e-12) & (pts[:, -1] <= spec.H + 1e-12)
+    if spec.geom == "box":
+        edge = onp.array([spec.Lperp] * (spec.d - 1) + [spec.H])
+        return onp.all((pts >= -1e-12) & (pts <= edge + 1e-12), axis=1)
     if spec.geom == "sphere":
         return onp.sum(pts ** 2, axis=1) <= spec.H ** 2 + 1e-9
     if spec.geom == "cylinder":

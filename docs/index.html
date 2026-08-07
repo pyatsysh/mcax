@@ -160,10 +160,12 @@ footer a{color:var(--muted)}
       that they are right is the actual work.</li>
     </ul>
     <p>mcax occupies the gap those three leave: hard cores, grand canonical,
-    JAX-native, and validated against closed forms. It is one file of physics
-    with no energies in it at all, because for hard particles the Boltzmann
-    factor is an indicator function and the whole model is an overlap test plus
-    three exact acceptances.</p>
+    JAX-native, and validated against closed forms. The core model has no
+    energies in it, because for hard particles the Boltzmann factor is an
+    indicator function and the whole of it is an overlap test plus three exact
+    acceptances. Energies enter only through the optional external fields and
+    attractive tails, as plain Boltzmann factors on the same three moves, and
+    switching both off recovers the hard-particle path bit for bit.</p>
 
 <pre><code>import jax; jax.config.update("jax_enable_x64", True)
 from mcax import make_spec, burn_and_sample, summary, eos

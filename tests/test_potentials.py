@@ -109,6 +109,12 @@ def test_evaluate_of_no_tail_is_zero():
     assert float(potentials.evaluate(None, jnp.asarray(2.0), 1.0)) == 0.0
 
 
+def test_mean_field_integral_of_no_tail_is_zero():
+    """Not a degenerate quadrature over an empty interval: exactly zero."""
+    for d in (1, 2, 3):
+        assert potentials.mean_field_integral(None, d) == 0.0
+
+
 # ---- the sampler with a tail switched on ---------------------------------- #
 
 def test_zero_depth_is_bitwise_the_hard_particle_run():
