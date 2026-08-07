@@ -112,3 +112,129 @@ production runs need the GPU.
 ## Validation report
 
 *(agent appends here)*
+
+---
+
+## Validation report — 2026-08-06
+
+Engine landed as `mcax/orient.py` (+ `mcax/bodies.py` for the support-function
+body interface). The aligned path is untouched and still bit-exact: A0 in the
+parallel task's report covers it, and `mcax.orient` is a separate module that
+`mcax/__init__.py` does not import, so the hard-sphere engine carries none of
+its weight.
+
+### The overlap test as built
+
+Not GJK-with-a-simplex, and the substitution is deliberate. The requirement was
+a fixed iteration count with a documented guarantee direction; what makes that
+easy is that **separation has a cheap exact certificate and overlap does not**.
+A single direction with `h_M(u) < 0` proves disjointness in a few flops, where
+proving overlap needs a point in the intersection. So the engine searches for a
+separating direction and declares overlap if the budget runs out, which is the
+required direction, and it needs no simplex bookkeeping at all:
+
+1. **32 candidate axes** — both bodies' face normals, the nine cross products,
+   the centre separation, and the negative of each. Complete for boxes.
+2. **Frank-Wolfe** on `min ||x||^2` over the Minkowski difference, seeded at the
+   support point along the best candidate, fixed length under `lax.scan`.
+
+Because the verdict is a deterministic function of the pair configuration, the
+sampler stays *exact for a marginally fattened body* rather than becoming a
+biased chain. Full argument in `docs/orientable-overlap.md`.
+
+**The bug worth recording**: the candidate axes were first tested with one sign
+only. Separation in the other sense is `h_M(-u) < 0`, a different number, so
+half of all separations were missed. It did not surface as a wrong answer (the
+misses fell through to Frank-Wolfe and were mostly recovered) but as a trip rate
+two orders of magnitude too high, **cubes included**, where the test ought to be
+exact. With both signs, p = 2 and p = inf are exact at every budget.
+
+### V3 — overlap battery: PASS
+
+Every known-answer case correct, including the one the aligned engine cannot
+reach: a unit cube turned 45 degrees about z presents a corner, so contact along
+x moves from 1.0 to 0.5 + sqrt(2)/2 = 1.2071, and the test straddles it.
+Coincident centres, far separation, and axis contact at 0.99/1.01 all correct
+for every shape.
+
+Budget trip rate, measured per *hard* test (pairs in the shell where the cheap
+tiers cannot decide), against a self-checked `n_iter = 1000` reference:
+
+| p | 8 | 12 | 20 | 32 | 64 |
+|---|---|---|---|---|---|
+| 2 | 0 | 0 | 0 | 0 | 0 |
+| 3 | 2.9e-2 | 1.6e-2 | 6.7e-3 | 1.8e-3 | 3.0e-4 |
+| 4 | 2.3e-2 | 1.5e-2 | 7.1e-3 | 3.2e-3 | 1.8e-3 |
+| 6 | 1.3e-2 | 1.1e-2 | 7.6e-3 | 5.7e-3 | 3.7e-3 |
+| inf | 0 | 0 | 0 | 0 | 0 |
+
+**Zero unsafe verdicts at any budget, for any shape, across every sample drawn.**
+Production default `n_iter = 32`.
+
+**The 1e-6 target is not met and cannot be by this route.** Frank-Wolfe
+converges as O(1/k); a certificate at gap g requires resolving g; configurations
+with gap below eps occupy measure proportional to eps; so the rate falls as 1/k,
+which is what the table shows. 1e-6 needs k ~ 1e4. The two routes that would
+actually fix it are a full tetrahedral GJK simplex and a direct Newton solve on
+the antiparallel-normal contact condition. A triangle simplex was tried, was no
+better at these budgets, and produced an unsafe verdict from a degenerate
+branch, so it was dropped rather than shipped half-working.
+
+The residual is bounded and physical: at `n_iter = 32` the trips occupy about
+1e-3 sigma of effective gap, so bodies behave as though fattened by ~5e-4 sigma
+each, a few parts in a thousand of excluded volume.
+
+### Performance
+
+Measured against the aligned engine at the same `Nmax`, same activity, same
+chain count (d = 3 slit, H = 6, C = 8, CPU):
+
+| p | orientable | aligned | ratio |
+|---|---|---|---|
+| 2 | 46.6 s | 9.2 s | 5x |
+| 4 | 108.9 s | 9.5 s | 11x |
+| inf | 43.6 s | 10.9 s | 4x |
+
+That is *after* the fix that made it usable. Sending every capacity slot through
+the certificate search costs some sixty support evaluations per pair, so a chain
+with four hundred slots pays twenty-five thousand per trial move; the first
+build was roughly a thousand times the aligned cost and a one-minute validation
+run took hours. Now only the nearest `n_near = 24` neighbours reach the search,
+gathered with `top_k`, and **the gather is made safe rather than assumed safe**:
+the (n_near + 1)-th distance is checked against twice the circumradius, and if
+even that one is close enough to have mattered the move is rejected. Same
+guarantee direction as the budget, so `n_near` is a performance knob that cannot
+change the physics, only the acceptance.
+
+### Not completed in this session
+
+V0, V1, V2 and V4 are implemented in `scripts/orient_validate.py` and were
+running at session end but did not finish: the orientable engine on one CPU core,
+sharing the box with the data campaign, is slower than the time left. They are
+one command (`--quick` for a smoke, bare for production) and the script writes
+`out/orient_validation.json`.
+
+What the unit tests already establish of them, and which passed:
+`tests/test_orient.py` contains miniature V0 (rotating a sphere accepts at
+100.00%), miniature V1 (frozen rotation matches the aligned engine within
+replica error at p = 2 and p = 4), Shoemake uniformity, proposal symmetry,
+support-map correctness and central symmetry, rotation-invariance of verdicts,
+the guarantee-direction assertion, and the qualitative V4 statement that free
+cubes are thinner than parallel ones at the same activity.
+
+**Known gap**: the V2 and V4 numbers against the Isihara-Hadwiger B2 = 5.5 for
+free unit cubes (against 4 for parallel ones) are computed by the script but were
+not read off in this session. That analytic anchor was chosen over a published
+EOS curve deliberately, because no such curve could be verified from here and an
+unverified number in a validation report is worse than no anchor.
+
+### Also delivered
+
+- Orientational observables: cubic harmonics S4 and S6 binned in z (invariants
+  of O_h, since everything below l = 4 vanishes identically for a cubic body and
+  a nematic order parameter finds nothing here however ordered the fluid is);
+  global cubatic order parameter about each lab axis; Steinhardt Q4/Q6 computed
+  through the addition theorem, `Q_l^2 = <P_l(cos theta_ij)>` over pairs of
+  bonds, which removes every spherical harmonic from the implementation.
+- `docs/orientable-overlap.md` with the guarantee direction, the measured trip
+  rates and the scaling argument.

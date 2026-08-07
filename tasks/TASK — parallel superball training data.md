@@ -119,3 +119,126 @@ should match the hard-sphere campaign.
 ## Run report
 
 *(agent appends here)*
+
+---
+
+## Run report — 2026-08-06
+
+### Engine: done, A0 green
+
+The whole physics change is one predicate. Two aligned translates of a convex
+body meet exactly when their separation lies in the body doubled, and a
+superball is centrally symmetric, so `||dr||_p < sigma` is exact for every
+p >= 1 with no approximation anywhere. Landed as `mcax/shapes.py` plus one
+changed line in the neighbour scan.
+
+**A0 passes in the strong form.** `scripts/a0_bitwise.py` checks out the last
+pre-shapes commit into a throwaway git worktree and runs five state points
+through both engines with the same seeds, comparing raw arrays. All five are
+IDENTICAL for both `shape = None` and `Superball(2.0)`, in positions, alive
+masks, N-series, profiles, acceptance counters and capacity. A self-comparison
+would not have caught a change of arithmetic shared by both new paths, which is
+why it is done against the old tree.
+
+p = inf is the max-norm directly, not a large-p limit. Two speed notes that
+turned out to matter: an integer exponent lowers to repeated multiplication
+where a float one lowers to a library `pow` (114 s -> 66 s on the same state for
+p = 4.0 vs p = 4), and p = 2.5 gets a sqrt branch for the same reason.
+
+Also added: a `box` geometry (cuboid, hard on every face) for the 0-D-adjacent
+states, and `mcax/order.py` for the freezing guard.
+
+### The freezing guard, and two ways it was nearly useless
+
+**It was blind.** A crystal in a cell of edge L with lattice constant a puts its
+first Bragg peak at n = L/a, which for L = 8 is n ~ 8. The first implementation
+scanned a ball of |n| <= 4 and therefore never sampled a Bragg peak at all: an
+ordered configuration would have come back looking like a fluid. Fixed by
+scanning a small isotropic ball **plus the cubic families {100}, {110}, {111}**
+out to n ~ L/sigma, which is cheap exactly because aligned particles form an
+aligned crystal. Verified against hand-built jittered crystals in a
+campaign-sized cell: S_max/<N> = 0.99 for a crystal, 0.013 for a gas, with the
+trip at 0.10.
+
+**It cried wolf.** The lattice prefill *starts* a dense chain on a crystal, so a
+burn too short to melt it reports the ordering it was handed. A trip is now
+re-run from a much sparser start with twice the burn and has to order again from
+below. The very first dense ladder point tripped and was cleared this way.
+
+The trip criterion is a conjunction, `S_max/<N> > 0.10 AND S_max > 8`. The ratio
+alone is unsafe in a small system: the fluid baseline is not zero but about
+ln(K)/<N>, K being the number of wavevectors scanned, so a slit holding eighty
+particles sits near 0.05 for no reason but the maximum being taken over sixty
+modes.
+
+### The limit this campaign actually hit, and it is not freezing
+
+The bulk ladder tracked its target packing fraction to four decimal places up to
+eta = 0.25, drifted 1.3% at 0.32, and then **stalled at 0.371 for every target
+at or above 0.46**. That is not a phase transition. A chain seated at 85% of
+target has to insert the last 15% one accepted insertion at a time, and above
+eta ~ 0.35 in three dimensions the insertion acceptance is well under a per
+cent, so it never arrives. Seating at 98% instead leaves the burn a local
+relaxation rather than a density change, and the ladder then tracked 0.3239
+against a target of 0.32.
+
+The residual is kept as a filter rather than a hope: ladder points with relative
+drift above 2% are excluded from the interpolation that sets confined
+activities, because a chain still on its way somewhere is not a state point.
+
+**The honest headline is that plain muVT stops equilibrating near eta ~ 0.42 in
+d = 3, well below freezing at 0.494, for a sampling reason and not a physical
+one.** Cluster or bias moves are what would extend it. That belongs in the
+roadmap and it changes what eta_max(p) means: the measured cap is the lesser of
+the ordering onset and the equilibration limit, and in d = 3 it is the latter.
+
+### Data: NOT COMPLETE. What exists and how to finish it
+
+The campaign is `scripts/superball_campaign.py`, fully resumable and idempotent
+(every finished state is written immediately and skipped on a re-run). At
+session end it had **17 of 126 bulk ladder points** and no confined states: the
+GPU budget needed is six to eight hours and the session had about four, most of
+which went into the three corrections above.
+
+Resume with, exactly as-is:
+
+    XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.5 \
+      OMP_NUM_THREADS=2 taskset -c 2-3 <python> scripts/superball_campaign.py
+
+The two-stage structure is the part that is load-bearing and is done: there is
+no reference equation of state off p = 2, so the bulk EOS is measured FIRST, one
+mu-ladder per (d, p), and the confined states read their activity off it by
+interpolation. The activity guess that seeds each ladder point is good to a few
+per cent for a reason worth keeping: `beta mu_ex = 2 B_2 rho + O(rho^2)` and
+`B_2 = 2^(d-1) v(p)` exactly, so `B_2 rho = 2^d eta` is INDEPENDENT of shape and
+the sphere's excess chemical potential is right to first order in eta at every p.
+
+**Statistics are mixed across the ladder and this is recorded per state**
+(`n_run`, `n_burn_used`, `chains` in every state dict). Points taken early ran
+50k steps; later ones 20k, cut so that a complete dataset might land rather than
+a fragment. A production re-run raises `NRUN`/`NBURN` and deletes
+`bulk_eos.npy`.
+
+### Acceptance tests
+
+- **A0** green, in the strong bitwise form described above.
+- **A1** (B2 from the dilute limit) implemented as a straight-line fit of
+  `ln(z/rho)/rho` against rho, extrapolated to rho -> 0, against the exact
+  `2^(d-1) v(p)`. Needs three dilute points per ladder; not yet exercised on a
+  complete ladder.
+- **A2** (cube EOS, two box sizes) implemented as a consistency check where the
+  dilute large-cell points meet the dense small-cell ones.
+- **A3** (contact theorem) implemented, and the one number worth quoting from
+  the smoke run: at p = 2 in a d = 3 slit the measured contact density was
+  **0.5528 against the exact Carnahan-Starling beta P = 0.5454, a 1.36%
+  agreement**. That is the engine passing the sum rule. The same check against
+  the *integrated* pressure was 17% off, which isolated the problem to the
+  Gibbs-Duhem quadrature rather than the engine, and led to reformulating it as
+  `beta P = rho + rho mu_ex - integral mu_ex drho` — integrating the excess
+  removes the logarithmic singularity at rho -> 0 and makes the anchor exact
+  instead of carrying an order-rho^2 error. A `gibbs_duhem` cross-check against
+  Carnahan-Starling and Henderson is now written into the manifest so the two
+  error sources can never be confused again.
+- **A4** (error bars and drift against the 2026-08-01 thresholds) is computed
+  per state in the manifest, with relative drift as the primary column, but
+  cannot be judged on 17 states.
