@@ -1,7 +1,7 @@
 [project]
 name = "mcax"
 dynamic = ["version"]
-description = "Batched hard-particle grand-canonical Monte Carlo in JAX: hard rods, discs and spheres in bulk and slit confinement, many independent chains advanced in lockstep on one device, everything jit/scan-compiled. Exact muVT acceptances, no energies, validated against Tonks/Percus, Henderson and Carnahan-Starling."
+description = "Batched hard-particle grand-canonical Monte Carlo in JAX: hard rods, discs and spheres in bulk, slit, spherical, cylindrical and wedge confinement, with optional external fields and attractive pair tails, many independent chains advanced in lockstep on one device, everything jit/scan-compiled. Exact muVT acceptances, validated against Tonks/Percus, Henderson, Carnahan-Starling and the exact 1-D square well."
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}

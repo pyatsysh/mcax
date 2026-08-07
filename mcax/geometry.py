@@ -32,9 +32,16 @@ multiplied into a parameter per geometry, so it is worth writing down once:
     geom        H                    Lperp                  psi
     bulk        box edge (periodic)  transverse edge        .
     slit        wall separation      transverse edge        .
+    box         wall separation      transverse EDGE, hard  .
     sphere      RADIUS               .                      .
     cylinder    axial period         RADIUS                 .
     wedge       height above apex    periodic edge (d = 3)  opening half-angle
+
+`box` is `slit` with the transverse periodicity taken away: a cuboid cavity
+with hard walls on every face. It exists for the small-cavity end of the ladder,
+where a periodic transverse axis would be a lie about the geometry, and it is
+the only bounded region here whose 0-D limit is reached along a DIAGONAL rather
+than an axis.
 
 `geometry.describe(spec)` prints this back for a given spec, which is quicker
 than counting axes by hand.
@@ -53,11 +60,14 @@ and the equality fails at order sigma/R. Use it as a check in `slit` and
 import numpy as onp
 import jax.numpy as np
 
-GEOMETRIES = ("bulk", "slit", "sphere", "cylinder", "wedge")
+from . import shapes
+
+GEOMETRIES = ("bulk", "slit", "box", "sphere", "cylinder", "wedge")
 
 # Smallest dimension each geometry makes sense in. A cylinder needs a radial
 # plane and an axis; a wedge needs a width axis and a height axis.
-_MIN_D = {"bulk": 1, "slit": 1, "sphere": 1, "cylinder": 2, "wedge": 2}
+_MIN_D = {"bulk": 1, "slit": 1, "box": 1, "sphere": 1, "cylinder": 2,
+          "wedge": 2}
 
 
 def check(geom, d):
@@ -79,7 +89,7 @@ def _ball(d, r):
 def bbox(spec):
     """(lo, hi), each (d,): the box insertions are proposed uniformly in."""
     d, g = spec.d, spec.geom
-    if g == "bulk" or g == "slit":
+    if g in ("bulk", "slit", "box"):
         lo = onp.zeros(d)
         hi = onp.array([spec.Lperp] * (d - 1) + [spec.H])
     elif g == "sphere":
@@ -104,7 +114,7 @@ def bbox_volume(spec):
 def volume(spec):
     """The TRUE accessible volume, which is what rho is measured against."""
     d, g = spec.d, spec.geom
-    if g == "bulk" or g == "slit":
+    if g in ("bulk", "slit", "box"):
         return spec.H * spec.Lperp ** (d - 1)
     if g == "sphere":
         return _ball(d, spec.H)
@@ -123,6 +133,9 @@ def periods(spec):
     elif g == "slit":
         per = onp.array([spec.Lperp] * (d - 1) + [1.0])
         flag = onp.array([True] * (d - 1) + [False])
+    elif g == "box":
+        per = onp.ones(d)
+        flag = onp.zeros(d, dtype = bool)
     elif g == "sphere":
         per = onp.ones(d)
         flag = onp.zeros(d, dtype = bool)
@@ -144,7 +157,7 @@ def bin_volume(spec, nbins):
     """
     d, g = spec.d, spec.geom
     edges = onp.linspace(0.0, extent(spec), nbins + 1)
-    if g in ("bulk", "slit"):
+    if g in ("bulk", "slit", "box"):
         return onp.full(nbins, spec.Lperp ** (d - 1) * (spec.H / nbins))
     if g == "sphere":
         return _ball(d, edges[1:]) - _ball(d, edges[:-1])
@@ -164,9 +177,27 @@ def max_separation(spec):
     """
     if spec.geom == "sphere":
         return 2.0 * spec.H                     # antipodes of the ball
+    if spec.geom == "box":
+        lo, hi = bbox(spec)
+        return float(onp.sqrt(onp.sum((hi - lo) ** 2)))     # the long diagonal
     if spec.geom == "slit" and spec.d == 1:
         return spec.H                           # the two walls
     return float("inf")
+
+
+def max_p_separation(spec):
+    """The same bound read in the p-norm the overlap test actually uses.
+
+    Not a rescaling of `max_separation`, because which separation is extremal
+    depends on the norm. In a cuboid the furthest pair sits at the corners and
+    the answer is the p-norm of the edge vector directly; in a ball the
+    constraint is Euclidean and the worst direction is the one maximising
+    ||x||_p at fixed ||x||_2, which `shapes.max_norm_ratio` gives.
+    """
+    if spec.geom == "box":
+        lo, hi = bbox(spec)
+        return float(shapes.norm(spec.shape, onp.asarray(hi - lo)))
+    return max_separation(spec) * shapes.max_norm_ratio(spec.shape, spec.d)
 
 
 def is_zero_dimensional(spec):
@@ -177,10 +208,17 @@ def is_zero_dimensional(spec):
     radius below sigma/2 qualifies in any dimension, and so does a
     one-dimensional slit narrower than sigma.
 
+    The comparison is in the p-norm, because that is the metric the overlap
+    test is written in, and for a non-spherical shape the two disagree. A
+    cuboid cavity is the sharpest case: parallel CUBES escape each other as
+    soon as one axis separates them by sigma, so a cavity is 0-D for them only
+    if every edge is shorter than sigma, whereas spheres in the same cavity are
+    still excluded out to the diagonal.
+
     Strict, not `<=`: at exactly 2R = sigma two centres sit at contact, which
     the overlap test allows, and the cavity would hold two.
     """
-    return max_separation(spec) < spec.sigma
+    return max_p_separation(spec) < spec.sigma
 
 
 def extent(spec):
@@ -206,6 +244,9 @@ def contains(spec, r):
         return np.asarray(True)
     if g == "slit":
         return (r[-1] >= 0.0) & (r[-1] <= spec.H)
+    if g == "box":
+        hi = np.asarray(bbox(spec)[1])
+        return np.all((r >= 0.0) & (r <= hi))
     if g == "sphere":
         return np.sum(r * r) <= spec.H ** 2
     if g == "cylinder":
@@ -256,6 +297,9 @@ def describe(spec):
     if g == "slit":
         return (f"slit in d = {d}: walls on centres at 0 and {spec.H}, "
                 f"transverse {spec.Lperp}, volume {v:.2f}")
+    if g == "box":
+        return (f"hard box in d = {d}: edges {spec.Lperp} x .. x {spec.H}, "
+                f"walls on every face, volume {v:.2f}")
     if g == "sphere":
         return f"spherical pore in d = {d}: radius {spec.H}, volume {v:.2f}"
     if g == "cylinder":

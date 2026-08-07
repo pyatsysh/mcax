@@ -36,6 +36,13 @@ profile. Dimensions d = 1, 2, 3, and d = 1 (hard rods) is kept deliberately:
 Tonks/Percus is exact there, which makes rods the engine's razor. Any detailed
 balance or bookkeeping bug shows up against an exact answer.
 
+The hard core itself lives in `mcax.shapes`, which generalises it from a sphere
+to an ALIGNED superball of exponent p: a cross-polytope at p = 1, the sphere at
+p = 2, a cube as p -> infinity. Only the overlap predicate changes, from a
+Euclidean norm against sigma to a p-norm against the same sigma, so everything
+above stands word for word. Particles do not rotate; see the module for why
+that is a model rather than a shortcut.
+
 Everything is float64 and jit/scan-compiled: a production sweep is one compiled
 call per state point.
 """
@@ -48,7 +55,9 @@ import jax.numpy as np
 
 from . import fields
 from . import geometry
+from . import order
 from . import potentials
+from . import shapes
 
 
 def require_float64():
@@ -88,6 +97,7 @@ class MCSpec(NamedTuple):
     psi: float         # wedge opening half-angle, radians; ignored otherwise
     field: object      # beta V_ext(r) callable, or None. See `mcax.fields`
     pair: object       # beta w(r2, sigma) tail, or None. See `mcax.potentials`
+    shape: object      # hard core, or None for a sphere. See `mcax.shapes`
 
     @property
     def slit(self):
@@ -98,7 +108,7 @@ class MCSpec(NamedTuple):
 
 def make_spec(d, H, z_act, Lperp = 10.0, sigma = 1.0, Nmax = None, dmax = 0.15,
               slit = None, p_disp = 0.5, geom = None, psi = onp.pi / 6.0,
-              field = None, pair = None):
+              field = None, pair = None, shape = None):
     """Build the static description of a state point.
 
     E.G. hard spheres at bulk packing fraction eta = 0.3 in a slit 8 diameters
@@ -112,6 +122,14 @@ def make_spec(d, H, z_act, Lperp = 10.0, sigma = 1.0, Nmax = None, dmax = 0.15,
 
         spec = make_spec(d = 3, geom = "sphere", H = 5.0, z_act = ...)
         spec = make_spec(d = 3, geom = "wedge", H = 8.0, psi = onp.pi/6, ...)
+
+    `shape` replaces the spherical hard core with an aligned superball of
+    exponent p, so the same slit filled with parallel cubes is
+
+        spec = make_spec(d = 3, H = 8.0, z_act = ..., shape = shapes.CUBE)
+
+    and `mcax.shapes` says what the family covers. Leaving it None is the
+    sphere and is arithmetically the pre-shape engine.
 
     `H` and `Lperp` mean different things in different geometries and
     `geometry.describe(spec)` will say which. Passing `slit = True/False`
@@ -130,15 +148,40 @@ def make_spec(d, H, z_act, Lperp = 10.0, sigma = 1.0, Nmax = None, dmax = 0.15,
     elif slit is not None:
         raise ValueError("pass geom or slit, not both")
     geometry.check(geom, int(d))
+    shapes.check(shape)
+    if pair is not None and shape is not None and not shape.is_sphere:
+        # A tail w(r) is a function of the EUCLIDEAN separation and every one
+        # in `mcax.potentials` returns zero inside r = sigma, on the assumption
+        # that the hard core has already excluded everything closer. That
+        # assumption fails the moment the core stops being a sphere: two
+        # octahedra of width sigma sit legally at Euclidean distance
+        # sigma/sqrt(d) along the diagonal, well inside the radius at which
+        # every tail here switches itself off, so the attraction would be
+        # silently absent for exactly the closest pairs. Making this work needs
+        # a tail conforming to the shape, which is a modelling decision and not
+        # a default, so it raises instead of quietly being wrong.
+        raise ValueError(
+            "a spherically symmetric pair tail and a non-spherical hard core "
+            "are not defined together here: the tails in `mcax.potentials` "
+            "vanish inside r = sigma, but non-spherical cores admit legal "
+            "pairs closer than that, so the attraction would switch off "
+            "precisely where it matters. Use shape = None (or Superball(2.0)) "
+            "with a tail, or run the superball hard.")
 
     spec = MCSpec(int(d), 0, float(H), float(Lperp), float(sigma),
                   float(z_act), float(dmax), str(geom), float(p_disp),
-                  float(psi), field, pair)
+                  float(psi), field, pair, shape)
     if Nmax is None:
-        # dense-limit headroom: eta_max ~ 0.75 in any d at sigma = 1. Sized on
+        # dense-limit headroom: eta_max ~ 0.84 in any d at sigma = 1. Sized on
         # the ACCESSIBLE volume, so a spherical pore is not handed the capacity
-        # of the cube around it.
-        Nmax = int(1.6 * geometry.volume(spec)) + 64
+        # of the cube around it, and on the volume of the SHAPE, so that a
+        # box of octahedra (a sixth the volume of the sphere they fit inside)
+        # is given the six times the capacity it will actually use. Written as
+        # a ratio against the sphere so the spherical path keeps the exact
+        # 1.6 it has always had, PRNG stream included.
+        ratio = shapes.volume(shapes.SPHERE, int(d), float(sigma)) / \
+            shapes.volume(shape, int(d), float(sigma))
+        Nmax = int(1.6 * geometry.volume(spec) * ratio) + 64
     return spec._replace(Nmax = int(Nmax))
 
 
@@ -166,6 +209,7 @@ class Result(NamedTuple):
     hist_n: onp.ndarray    # (C, nbins) the same, weighted by instantaneous N
     gr: onp.ndarray        # (C, nbins_g) pair separations, empty unless asked
     nsamples: int          # draws per chain, the divisor for all of the above
+    sk: onp.ndarray = None  # (C, K) summed |rho_k|^2. See `mcax.order`
 
     @property
     def capacity_warning(self):
@@ -200,6 +244,13 @@ def lattice_fill(spec, n0, seed = 0):
     burn removes the transient. Variance reduction only: cold and warm starts
     must equilibrate to the same density, and the tests check that they do.
     """
+    # A cubic lattice of spacing a > sigma is overlap-free for EVERY superball
+    # in the family, not just the sphere: axial neighbours are a apart in the
+    # p-norm as well as the Euclidean one, and a diagonal neighbour is further
+    # off by 2^(1/p) >= 1. So the same 1.05 works throughout. What changes with
+    # p is how much it seats: at p = 1 an octahedron occupies a sixth of the
+    # cell a sphere would, so the lattice tops out near eta = 0.14 and a dense
+    # run of them has to fill grand-canonically after all.
     a = 1.05 * spec.sigma
     lo, hi = geometry.bbox(spec)
     _, wraps = geometry.periods(spec)
@@ -270,21 +321,28 @@ def _dist2(spec, a, b):
 def _neighbour_scan(spec, pos, alive, trial, skip_idx):
     """(overlaps, pair energy) of `trial` against every alive particle.
 
-    Both answers come out of ONE sweep of the distance array, because the
+    Both answers come out of ONE sweep of the separation array, because the
     attractive tail needs exactly the separations the overlap test already
     computed. So switching a tail on costs an extra masked sum per sweep and
     not an extra sweep.
+
+    The overlap predicate belongs to the SHAPE and the tail to the Euclidean
+    distance, and the two are the same question only for spheres. Both are
+    read off the one minimum-image displacement, so a superball core costs a
+    different reduction rather than a second sweep. At `spec.shape = None` the
+    predicate is the sum of squares against sigma^2, which is what this
+    function computed before shapes existed, to the bit.
 
     Pass `skip_idx = spec.Nmax` to skip nobody: an out-of-bounds scatter is
     dropped by JAX, whereas -1 would wrap round and silently mask the LAST
     capacity slot, which holds a real particle in a nearly-full chain.
     """
-    d2 = _dist2(spec, pos, trial[None, :])
+    dr = geometry.min_image(spec, pos - trial[None, :])
     live = alive.at[skip_idx].set(False)
-    overlap = np.any(live & (d2 < spec.sigma ** 2))
+    overlap = np.any(live & shapes.overlaps(spec.shape, dr, spec.sigma))
     if spec.pair is None:
         return overlap, np.asarray(0.0)
-    u = potentials.evaluate(spec.pair, d2, spec.sigma)
+    u = potentials.evaluate(spec.pair, np.sum(dr * dr, axis = -1), spec.sigma)
     return overlap, np.sum(np.where(live, u, 0.0))
 
 
@@ -400,17 +458,22 @@ class Accum(NamedTuple):
     Ns: np.ndarray         # (C, nchunks) particle number: (chain, draw)
     hist_n: np.ndarray     # (C, nbins) the same histogram weighted by N
     gr: np.ndarray         # (C, nbins_g) pair separations, empty if switched off
+    sk: np.ndarray         # (C, K) summed |rho_k|^2, empty unless kvecs given
 
 
 @partial(jax.jit, static_argnums = (0, 2, 3, 4, 5, 6))
-def run(spec, state, nsteps, thin, nbins, nbins_g = 0, rmax = None):
+def run(spec, state, nsteps, thin, nbins, nbins_g = 0, rmax = None,
+        kvecs = None):
     """Advance all chains `nsteps`, accumulating at every thinning boundary.
 
-    Returns (state, `Accum`). Three of the five accumulators are there for the
+    Returns (state, `Accum`). Three of the accumulators are there for the
     fluctuation identities in `mcax.observables`: `hist_n` is the density-number
     cross-covariance that gives d rho(z)/d(beta mu), and `gr` gives the pair
-    correlations. All are sampled at thinning boundaries, so they cost one
-    reduction per `thin` steps and nothing per step.
+    correlations. `kvecs` adds the structure factor, which is the freezing
+    alarm of `mcax.order` and the one accumulator whose absence can invalidate
+    a run rather than merely leave it incomplete. All are sampled at thinning
+    boundaries, so they cost one reduction per `thin` steps and nothing per
+    step.
 
     The precision guard runs at TRACE time, so it costs one comparison per
     compile and nothing per step, and it still catches a state handed in from
@@ -443,16 +506,21 @@ def run(spec, state, nsteps, thin, nbins, nbins_g = 0, rmax = None):
                 spec, p, a, nbins_g, rmax))(pos, alive)
         else:
             g = np.zeros((C, 0))
-        return st, (h, n, h * n[:, None], g)
+        if kvecs is None:
+            s = np.zeros((C, 0))
+        else:
+            s = jax.vmap(lambda p, a: order.sk_chain(p, a, kvecs))(pos, alive)
+        return st, (h, n, h * n[:, None], g, s)
 
     carry = (state.pos, state.alive, state.key, state.acc, state.tot, state.nhi)
-    carry, (hists, Ns, hns, grs) = jax.lax.scan(
+    carry, (hists, Ns, hns, grs, sks) = jax.lax.scan(
         chunk, carry, None, length = nchunks)
     return MCState(*carry), Accum(
         hist = np.sum(hists, axis = 0),             # (C, nbins)
         Ns = np.swapaxes(Ns, 0, 1),                 # (C, nchunks)
         hist_n = np.sum(hns, axis = 0),
         gr = np.sum(grs, axis = 0),
+        sk = np.sum(sks, axis = 0),
     )
 
 
@@ -479,7 +547,7 @@ def density_profile(spec, hist, nsamples):
 
 
 def burn_and_sample(spec, C, seed, n_burn, n_run, thin, nbins, n0 = 0,
-                    nbins_g = 0):
+                    nbins_g = 0, kvecs = None):
     """Convenience: burn-in, then sample. Returns a `Result`.
 
     `n0` is the lattice-prefill count (see `lattice_fill`). The returned `Ns`
@@ -496,7 +564,8 @@ def burn_and_sample(spec, C, seed, n_burn, n_run, thin, nbins, n0 = 0,
     # Reset the counters but NOT nhi: capacity pressure during burn-in is just
     # as much a broken-ensemble signal as during sampling.
     st = st._replace(acc = np.zeros_like(st.acc), tot = np.zeros_like(st.tot))
-    st, ac = run(spec, st, n_run, thin, nbins, nbins_g = nbins_g)
+    st, ac = run(spec, st, n_run, thin, nbins, nbins_g = nbins_g,
+                 kvecs = None if kvecs is None else np.asarray(kvecs))
     z, rho = density_profile(spec, onp.asarray(ac.hist), n_run // thin)
     acc = onp.asarray(st.acc).sum(0) / onp.maximum(onp.asarray(st.tot).sum(0), 1)
     Ns = onp.asarray(ac.Ns)
@@ -505,4 +574,5 @@ def burn_and_sample(spec, C, seed, n_burn, n_run, thin, nbins, n0 = 0,
                   n_mean = float(Ns.mean()), n_hi = n_hi, capacity = spec.Nmax,
                   saturation = n_hi / spec.Nmax, state = st,
                   hist = onp.asarray(ac.hist), hist_n = onp.asarray(ac.hist_n),
-                  gr = onp.asarray(ac.gr), nsamples = n_run // thin)
+                  gr = onp.asarray(ac.gr), nsamples = n_run // thin,
+                  sk = onp.asarray(ac.sk))

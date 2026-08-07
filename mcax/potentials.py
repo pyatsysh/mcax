@@ -163,8 +163,9 @@ def mean_field_integral(pair, d, sigma = 1.0, rmax = None, n = 40_000):
     is (1/2) rho^2 times this integral, so comparing against a cDFT calculation
     starts by checking that both sides use the same number.
     """
-    rmax = (rmax if rmax is not None else
-            getattr(pair, "rcut", 2.0) * sigma) if pair is not None else sigma
+    if pair is None:
+        return 0.0
+    rmax = rmax if rmax is not None else getattr(pair, "rcut", 2.0) * sigma
     r = onp.linspace(sigma * (1.0 + 1e-9), rmax, n)
     w = onp.asarray(evaluate(pair, np.asarray(r ** 2), sigma))
     shell = {1: 2.0 * onp.ones_like(r),

@@ -46,6 +46,21 @@ Accuracy by dimension, which matters when reading a validation tolerance:
 All expressions are dimensionless: beta = 1, Lambda = 1, lengths in units of
 the hard-core diameter sigma, densities per unit d-volume. Attraction strengths
 are therefore beta epsilon, and temperature enters only through them.
+
+**Everything here is the SPHERE, p = 2 in `mcax.shapes`, with two exceptions
+that matter.** There is no reference equation of state for a superball fluid at
+general p, which is a large part of why simulating one is worth doing at all.
+What survives the change of shape is:
+
+  d = 1        the whole module. The overlap test in one dimension is
+               |dr| < sigma for every p, so a rod is a rod and Tonks is exact
+               across the entire family. This is the razor for the shape layer.
+  low density  the second virial coefficient, in closed form at any p, as
+               `mcax.shapes.b2`. A measured rho(z) has to approach it, and that
+               is the only analytic check available in d = 2 and d = 3.
+
+Read `B` below as the sphere's entry in `shapes.packing`, which agrees with it
+identically and generalises it.
 """
 import numpy as onp
 
@@ -224,10 +239,14 @@ def f_ex_0d(eta):
 
     This is the function FMT has to reproduce under dimensional crossover, and
     the reason the Rosenfeld functional has the log term it does. It rises from
-    0 at an empty cavity to 1 at a full one.
+    0 at an empty cavity to 1 at a full one, and the full cavity is handled
+    explicitly: the limit of (1-eta) ln(1-eta) is 0, but evaluated blindly at
+    eta = 1 it is 0 times -inf, which floating point calls nan.
     """
     eta = onp.asarray(eta, dtype = float)
-    return eta + (1.0 - eta) * onp.log1p(-eta)
+    with onp.errstate(divide = "ignore", invalid = "ignore"):
+        term = (1.0 - eta) * onp.log1p(-eta)
+    return eta + onp.where(eta == 1.0, 0.0, term)
 
 
 def mu_ex_0d(eta):

@@ -215,10 +215,18 @@ def test_the_occupied_cavity_is_uniformly_filled(d):
 # ---- the reference free energy -------------------------------------------- #
 
 def test_zero_dimensional_free_energy_limits():
-    """f_ex rises from 0 at an empty cavity to 1 at a full one."""
+    """f_ex rises from 0 at an empty cavity to 1 at a full one.
+
+    The endpoint is asserted AT eta = 1, not merely near it: the naive
+    expression is 0 times -inf there, which floating point evaluates to nan,
+    and a reference function that returns nan at its own advertised limit is
+    the kind of thing that surfaces deep inside somebody's crossover check.
+    """
     assert eos.f_ex_0d(0.0) == pytest.approx(0.0, abs=1e-12)
     assert eos.f_ex_0d(1.0 - 1e-12) == pytest.approx(1.0, abs=1e-9)
+    assert float(eos.f_ex_0d(1.0)) == 1.0
     assert eos.f_ex_0d(0.5) == pytest.approx(0.5 + 0.5 * onp.log(0.5), rel=1e-12)
+    assert onp.all(onp.isfinite(eos.f_ex_0d(onp.linspace(0.0, 1.0, 101))))
 
 
 @pytest.mark.parametrize("eta", [0.1, 0.35, 0.6, 0.85])
