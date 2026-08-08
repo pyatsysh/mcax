@@ -206,24 +206,38 @@ def test_rotating_a_sphere_is_always_accepted():
     assert r.acc[1] == pytest.approx(1.0, abs=1e-12)
 
 
-def test_frozen_rotation_matches_the_aligned_engine():
+@pytest.mark.parametrize("p", [2.0, 4.0])
+def test_frozen_rotation_matches_the_aligned_engine(p):
     """V1 in miniature: dtheta = 0 from an aligned start is the parallel
     superball model, reached through the support-function overlap test instead
     of the p-norm one. The two engines share no overlap code, so agreement
-    certifies both."""
-    for p in (2.0, 4.0):
-        osp = orient.make_spec(H=6.0, Lperp=6.0, z_act=6.0, body=Superball(p),
-                               geom="slit", dtheta=0.0, p_rot=0.1)
-        ro = orient.burn_and_sample(osp, C=8, seed=2, n_burn=4_000,
-                                    n_run=16_000, thin=50, nbins=24,
-                                    aligned=True)
-        psp = make_spec(d=3, H=6.0, Lperp=6.0, z_act=6.0, geom="slit",
-                        shape=shapes.Superball(p), Nmax=osp.Nmax)
-        rp = burn_and_sample(psp, C=8, seed=2, n_burn=4_000, n_run=16_000,
-                             thin=50, nbins=24)
-        e = onp.sqrt(ro.Ns.mean(axis=1).std(ddof=1) ** 2
-                     + rp.Ns.mean(axis=1).std(ddof=1) ** 2) / onp.sqrt(8)
-        assert abs(ro.n_mean - rp.n_mean) < 4.0 * e + 0.02 * rp.n_mean
+    certifies both.
+
+    **Both engines get the same lattice prefill, and without it this test is
+    not about what it claims.** They run different move mixes, so from an empty
+    box the one proposing fewer translations per step makes room for new
+    particles more slowly and is simply further behind at a fixed step count.
+    Measured at p = 2: from empty at 16k steps the two differ by 0.6% and the
+    gap is still closing; seeded at 90% and run to 40k they agree to 0.1%. The
+    first number is a mixing rate, the second is the physics, and only the
+    second is what V1 asks about.
+    """
+    z = 6.0
+    osp = orient.make_spec(H=6.0, Lperp=6.0, z_act=z, body=Superball(p),
+                           geom="slit", dtheta=0.0, p_rot=0.1)
+    psp = make_spec(d=3, H=6.0, Lperp=6.0, z_act=z, geom="slit",
+                    shape=shapes.Superball(p), Nmax=osp.Nmax)
+    from mcax import eos
+    v = bodies.volume(Superball(p), 3)
+    n0 = int(0.9 * shapes.volume(shapes.Superball(2.0), 3) / v
+             * eos.rho_of_z(3, z) * geometry.volume(psp))
+    kw = dict(C=8, seed=2, n_burn=12_000, n_run=30_000, thin=50, nbins=24,
+              n0=n0)
+    ro = orient.burn_and_sample(osp, aligned=True, **kw)
+    rp = burn_and_sample(psp, **kw)
+    e = onp.sqrt(ro.Ns.mean(axis=1).std(ddof=1) ** 2
+                 + rp.Ns.mean(axis=1).std(ddof=1) ** 2) / onp.sqrt(8)
+    assert abs(ro.n_mean - rp.n_mean) < 4.0 * e + 0.02 * rp.n_mean
 
 
 def test_free_cubes_are_less_dense_than_parallel_ones():
