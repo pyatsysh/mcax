@@ -421,7 +421,19 @@ def _step_chain(spec, carry, _):
     slot = np.argmax(~alive)
     has_slot = ~np.all(alive)
     r_ins = jax.random.uniform(k_move, (3,), minval = lo, maxval = hi)
-    q_ins = q_random(k_q)
+    # FROZEN MODE INSERTS AT THE REFERENCE ORIENTATION, and this is not a
+    # detail. `dtheta = 0` stops existing particles from turning, but insertion
+    # creates a particle that has no previous orientation to keep, and drawing
+    # that from Haar makes the model a QUENCHED-RANDOM-ORIENTATION fluid rather
+    # than an aligned one: nothing ever rotates, but every particle arrived
+    # pointing somewhere different. That has a larger excluded volume than the
+    # parallel model and a correspondingly lower density at the same activity.
+    # Measured before the fix, against `mcax.core` at the same activity: 0.1%
+    # apart at p = 2 (where orientation cannot matter), 7% at p = 4, and 28%
+    # for cubes. The draw is still consumed so the PRNG stream does not depend
+    # on the mode.
+    q_draw = q_random(k_q)
+    q_ins = np.array([1.0, 0.0, 0.0, 0.0]) if spec.dtheta == 0.0 else q_draw
     over_i = _any_overlap(spec, pos, quat, alive, r_ins, q_ins, spec.Nmax)
     # No orientational factor: the proposal draws from the Haar measure the
     # ensemble is defined against, so it cancels exactly, and deletion picks

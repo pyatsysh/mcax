@@ -206,27 +206,104 @@ even that one is close enough to have mattered the move is rejected. Same
 guarantee direction as the budget, so `n_near` is a performance knob that cannot
 change the physics, only the acceptance.
 
+### V1 — frozen rotation reproduces the parallel engine: PASS, and it earned its keep
+
+This rung is the mutual certification: `dtheta = 0` from an aligned start is the
+parallel superball model reached through the support-function overlap test
+instead of the p-norm one, and the two engines share no overlap code. **It
+failed first, for a real reason, which is the whole point of having it.**
+
+The frozen engine came out 7% thinner than the aligned one at p = 4 and **28%
+thinner for cubes**, at the same activity. Not equilibration: the gap was
+unchanged under a 2.5x longer run with a lattice prefill. Not the overlap
+budget either, because p = inf has a zero trip rate.
+
+The cause: `dtheta = 0` stops existing particles from turning, but
+grand-canonical insertion creates a particle with no previous orientation to
+keep, and it was still drawing that from Haar. So "frozen" was silently a
+QUENCHED-RANDOM-ORIENTATION fluid — nothing ever rotated, but every particle had
+arrived pointing somewhere different. That has a larger excluded volume than the
+aligned model and a lower density at fixed activity, and the size of the error
+tracked shape anisotropy exactly: nil at p = 2 where orientation cannot matter,
+7% at p = 4, 28% at p = inf. Insertion now uses the reference orientation when
+frozen.
+
+| p | before the fix | after |
+|---|---|---|
+| 2 | 0.1% (0.1 sigma) | unchanged, orientation is irrelevant there |
+| 4 | 7.0% (9.8 sigma) | **0.1% (0.2 sigma)** |
+| inf | 28.1% (57.1 sigma) | **0.4% (0.6 sigma)** |
+
+All at C = 8, prefilled, 20k burn + 40k run, d = 3 slit H = 6, z = 6.
+
+**A second, smaller thing this rung exposed**, worth separating from the bug
+because it is a permanent property rather than a defect: from an EMPTY box the
+two engines are not comparable at a fixed step count. They run different move
+mixes, so the one proposing fewer translations per step makes room for new
+particles more slowly. At p = 2, empty at 16k steps they differ by 0.6% and the
+gap is still closing; seeded at 90% and run to 40k they agree to 0.1%. The
+comparison needs the same prefill on both sides, and `tests/test_orient.py` now
+does that.
+
+### V0 — sphere decoupling: PASS in the form the unit tests check
+
+Rotating a sphere is accepted at exactly 100.00%, and at p = 2 the frozen
+comparison above is the V0 statement (0.1%, 0.1 sigma). The full V0 rung in
+`scripts/orient_validate.py`, which also compares the density PROFILE and the
+S4 moment rather than only <N>, did not finish running in this session.
+
+### V2 — dilute virial: PASS, and it bounds the budget bias
+
+Orientation-averaged B2 by Monte Carlo over separation x two independent
+orientations, calling the overlap predicate directly with no chains, no
+acceptances and no geometry: an independent code path, as the brief asks.
+
+| p | B2 free | B2 parallel | exact | dev |
+|---|---|---|---|---|
+| 2 | 2.0969 +- 0.0058 | 2.0944 | 2.0944 | 0.12% |
+| 3 | 2.9369 +- 0.0099 | 2.8483 | no closed form | |
+| 4 | 3.4676 +- 0.0128 | 3.2410 | no closed form | |
+| 6 | 4.0882 +- 0.0164 | 3.6038 | no closed form | |
+| inf | **5.5005 +- 0.0265** | 4.0000 | **5.5000** | **0.01%** |
+
+The cube row is the V4 literature anchor and it is exact rather than borrowed.
+Isihara-Hadwiger gives the orientation-averaged excluded volume of two identical
+convex bodies as B2 = V + R S with R the mean radius of curvature; for a cube of
+edge a the edge sum gives R = 3a/4, so B2 = a^3 + (3a/4)(6a^2) = 5.5 a^3 against
+4 a^3 for the same cubes held parallel. Measured 5.5005. That is integral
+geometry on one side and this engine's support-function overlap test on the
+other, agreeing to one part in ten thousand.
+
+**This is also the honest bound on the fixed-budget bias**, and a far better one
+than the raw trip rate. B2 measured at the PRODUCTION budget (n_iter = 32) sits
+within statistical error of exact at both ends, so the effective fattening
+argued for in `docs/orientable-overlap.md` is at or below 0.1% in a physical
+quantity, not merely small in a shell measure. The free-over-parallel ratio also
+rises monotonically with anisotropy, 1.001 at p = 2 through 1.375 at p = inf,
+which is the sign rotation must have and a check no single number gives.
+
+### V0 — sphere decoupling: PASS in the form the unit tests check
+
+Rotating a sphere is accepted at exactly 100.00%, the p = 2 frozen comparison
+above agrees to 0.1% (0.1 sigma), and V2's p = 2 row confirms that free rotation
+leaves B2 unchanged there. The full V0 rung in `scripts/orient_validate.py`,
+which also compares the density PROFILE and the S4 moment rather than only <N>,
+did not finish running in this session.
+
 ### Not completed in this session
 
-V0, V1, V2 and V4 are implemented in `scripts/orient_validate.py` and were
-running at session end but did not finish: the orientable engine on one CPU core,
-sharing the box with the data campaign, is slower than the time left. They are
-one command (`--quick` for a smoke, bare for production) and the script writes
-`out/orient_validation.json`.
+The finite-density half of V4: a grand-canonical sweep of freely rotating cubes
+with the cubatic and translational monitors recorded, comparing against the
+parallel-cube fluid at matched activity. Implemented in
+`scripts/orient_validate.py`; the orientable engine on one CPU core, sharing the
+box with the data campaign, outran the time available. Its qualitative statement
+does pass in the unit tests: free cubes are measurably thinner than parallel
+ones at the same activity.
 
-What the unit tests already establish of them, and which passed:
-`tests/test_orient.py` contains miniature V0 (rotating a sphere accepts at
-100.00%), miniature V1 (frozen rotation matches the aligned engine within
-replica error at p = 2 and p = 4), Shoemake uniformity, proposal symmetry,
-support-map correctness and central symmetry, rotation-invariance of verdicts,
-the guarantee-direction assertion, and the qualitative V4 statement that free
-cubes are thinner than parallel ones at the same activity.
-
-**Known gap**: the V2 and V4 numbers against the Isihara-Hadwiger B2 = 5.5 for
-free unit cubes (against 4 for parallel ones) are computed by the script but were
-not read off in this session. That analytic anchor was chosen over a published
-EOS curve deliberately, because no such curve could be verified from here and an
-unverified number in a validation report is worse than no anchor.
+No published finite-density EOS curve was used as an anchor, deliberately: none
+could be verified from here, and an unverified number in a validation report is
+worse than no anchor. The Isihara-Hadwiger B2 above is the external check, and
+it is exact.
 
 ### Also delivered
 

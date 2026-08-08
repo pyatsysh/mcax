@@ -192,6 +192,24 @@ one.** Cluster or bias moves are what would extend it. That belongs in the
 roadmap and it changes what eta_max(p) means: the measured cap is the lesser of
 the ordering onset and the equilibration limit, and in d = 3 it is the latter.
 
+### The bulk cap is necessary and NOT sufficient, and the per-state monitor is what saves the confined data
+
+Worth separating out, because it changes how the guard should be read. The
+eta_max(p) table is measured in BULK and applied to the reservoir packing
+fraction of each confined state. Confinement then raises the local density above
+that reservoir value, so a state comfortably under its bulk cap can still order.
+
+Measured, in the widest slit: `d3_slit_H16_eta0.30_p2` and the same at p = 2.5
+both tripped the monitor, and p = 2's cap is 0.340, well above the 0.30 they
+were set at. The p = 2.5 state came out at an in-slit eta of 0.319 against its
+cap of 0.304.
+
+So the cap alone would have passed poisoned states. What catches them is that
+every state carries its OWN structure-factor monitor and is flagged on its own
+evidence, not on the bulk table's. Rate so far: three trips in about a hundred
+and fifty confined states, against thirty-five refused by the cap before running
+— so the two mechanisms are catching different things and both are load-bearing.
+
 ### Data: NOT COMPLETE. What exists and how to finish it
 
 The campaign is `scripts/superball_campaign.py`, fully resumable and idempotent
