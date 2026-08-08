@@ -210,53 +210,61 @@ evidence, not on the bulk table's. Rate so far: three trips in about a hundred
 and fifty confined states, against thirty-five refused by the cap before running
 — so the two mechanisms are catching different things and both are load-bearing.
 
-### Data: NOT COMPLETE. What exists and how to finish it
+### Data: the campaign COMPLETED. 183 states, and what to trust in them
 
-The campaign is `scripts/superball_campaign.py`, fully resumable and idempotent
-(every finished state is written immediately and skipped on a re-run). At
-session end it had **17 of 126 bulk ladder points** and no confined states: the
-GPU budget needed is six to eight hours and the session had about four, most of
-which went into the three corrections above.
+    bulk ladders   126 points, 12 ladders (6 shapes x 2 dimensions)
+    confined       183 states: train 86, val 11, test_width 19,
+                   test_shape 17, test_box 32, flagged 18
+    refused        35 states above their measured eta_max(p), each logged
 
-Resume with, exactly as-is:
+Landed in `dimint-dft/data/superball/` in the measure-campaign schema:
+`bulk_eos.npy`, `mc_states.npy`, `excluded.npy`, `manifest.json`, `MANIFEST.md`.
 
-    XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.5 \
-      OMP_NUM_THREADS=2 taskset -c 2-3 <python> scripts/superball_campaign.py
+**Statistics are NOT uniform and this is recorded per state** (`n_run`,
+`n_burn_used`, `chains`). The run length was cut twice mid-campaign, from 120k
+steps to 50k to 20k, so that a complete dataset would land rather than a
+fragment. Error bars are therefore roughly 2.5x wider than the 2026-08-01
+hard-sphere campaign's. A production set is the same script with `NRUN` and
+`NBURN` raised and `bulk_eos.npy` deleted; nothing else changes.
 
-The two-stage structure is the part that is load-bearing and is done: there is
-no reference equation of state off p = 2, so the bulk EOS is measured FIRST, one
-mu-ladder per (d, p), and the confined states read their activity off it by
-interpolation. The activity guess that seeds each ladder point is good to a few
-per cent for a reason worth keeping: `beta mu_ex = 2 B_2 rho + O(rho^2)` and
-`B_2 = 2^(d-1) v(p)` exactly, so `B_2 rho = 2^d eta` is INDEPENDENT of shape and
-the sphere's excess chemical potential is right to first order in eta at every p.
+### Acceptance tests, final
 
-**Statistics are mixed across the ladder and this is recorded per state**
-(`n_run`, `n_burn_used`, `chains` in every state dict). Points taken early ran
-50k steps; later ones 20k, cut so that a complete dataset might land rather than
-a fragment. A production re-run raises `NRUN`/`NBURN` and deletes
-`bulk_eos.npy`.
+**A1 — second virial.** Every one of the twelve ladders agrees with the exact
+$2^{d-1} v(p)$ **within replica error**, worst 2.5 sigma. The precision is
+poor: typical deviation 4%, worst 10.9%, on a quantity known in closed form.
+That is the cut statistics plus the fact that the estimator is an extrapolation
+of $\ln(z/\rho)/\rho$ to zero density, which magnifies whatever noise the
+dilute points carry. The p = 2 control is the tightest at 0.23% (0.2 sigma),
+which says the method is sound and the sampling is thin. There is a hint of a
+negative bias in d = 3 for p >= 3 (four rows, mean -3.9%) that the statistics
+cannot resolve from noise; it is the first thing to re-check with production
+runs.
 
-### Acceptance tests
+**A2 — cube EOS, two box sizes.** Computed in the manifest.
 
-- **A0** green, in the strong bitwise form described above.
-- **A1** (B2 from the dilute limit) implemented as a straight-line fit of
-  `ln(z/rho)/rho` against rho, extrapolated to rho -> 0, against the exact
-  `2^(d-1) v(p)`. Needs three dilute points per ladder; not yet exercised on a
-  complete ladder.
-- **A2** (cube EOS, two box sizes) implemented as a consistency check where the
-  dilute large-cell points meet the dense small-cell ones.
-- **A3** (contact theorem) implemented, and the one number worth quoting from
-  the smoke run: at p = 2 in a d = 3 slit the measured contact density was
-  **0.5528 against the exact Carnahan-Starling beta P = 0.5454, a 1.36%
-  agreement**. That is the engine passing the sum rule. The same check against
-  the *integrated* pressure was 17% off, which isolated the problem to the
-  Gibbs-Duhem quadrature rather than the engine, and led to reformulating it as
-  `beta P = rho + rho mu_ex - integral mu_ex drho` — integrating the excess
-  removes the logarithmic singularity at rho -> 0 and makes the anchor exact
-  instead of carrying an order-rho^2 error. A `gibbs_duhem` cross-check against
-  Carnahan-Starling and Henderson is now written into the manifest so the two
-  error sources can never be confused again.
-- **A4** (error bars and drift against the 2026-08-01 thresholds) is computed
-  per state in the manifest, with relative drift as the primary column, but
-  cannot be judged on 17 states.
+**A3 — contact theorem.** Two different claims, and only one of them is clean.
+
+*At p = 2*, where the pressure is known independently, the engine satisfies the
+sum rule at the 2% level: contact 0.5563 against Carnahan-Starling 0.5454 in
+d = 3, and 0.7705 against Henderson 0.7883 in d = 2. The residual is the
+contact extrapolation out of 0.05-wide bins, not the sampler.
+
+*At every other p* the pressure has to come from the measured ladder, and
+contact against integrated beta P scatters by 4% to 15%, worst at p = 2.5 and
+p = 3. **I cannot say from this data which side is wrong.** Both carry error;
+the statistics are thin; and there is no third reference off p = 2 by
+construction. What can be said is that the integration is not the obvious
+culprit: the Gibbs-Duhem quadrature was verified against Carnahan-Starling and
+Henderson directly and is good to 0.5% out to eta = 0.25 in d = 3 and eta = 0.48
+in d = 2 (see the cross-check table in the manifest). Above that it degrades
+fast and past the equilibration wall it is meaningless, 26% and then 97% across
+the three stalled points, which are now excluded from the pressure curve by the
+same relative-drift cut that guards the activity interpolation.
+
+This is the sharpest open question in the dataset and it should be settled
+before the confined profiles at p != 2 are trusted quantitatively.
+
+**A4 — error bars and drift.** Per state in the manifest, with relative drift as
+the primary column. The sigma column is retained but should not be thresholded:
+on the small box states it reads 3 sigma at 1.7% relative, which is fine, and a
+fixed sigma cut would reject the best-sampled runs first.

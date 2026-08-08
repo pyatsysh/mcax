@@ -374,7 +374,18 @@ def _any_overlap(spec, pos, quat, alive, trial_r, trial_q, skip_idx):
     idx = near[:spec.n_near]
     # The one just outside the gather. If it is still within reach, the gather
     # was too small for this configuration and the answer is "overlap".
-    truncated = d2m[near[-1]] < (2.0 * r_out) ** 2
+    #
+    # Unless there IS nothing outside the gather. When the chain has no more
+    # capacity than `n_near`, `near[-1]` is a particle the expensive test
+    # already examined, and reading it as evidence of truncation rejects every
+    # move with a neighbour anywhere near it. That is still a deterministic
+    # predicate, so it does not break detailed balance, but it samples a fluid
+    # of bodies fattened to twice the circumradius rather than the one asked
+    # for. The condition is static, so this branch costs nothing at run time.
+    if spec.n_near < spec.Nmax:
+        truncated = d2m[near[-1]] < (2.0 * r_out) ** 2
+    else:
+        truncated = np.asarray(False)
 
     Ra = q_matrix(trial_q)
     Rb = q_matrix(quat[idx])
@@ -501,8 +512,21 @@ def _cubic_chain(spec, pos, quat, alive, nbins):
     at which a cubic body can express itself at all: everything below l = 4 is
     identically zero by symmetry, which is why a nematic order parameter finds
     nothing here however ordered the fluid is.
+
+    **The wall normal goes into the BODY frame, and the direction of that
+    transpose is the whole content of the invariance.** c = Omega^T zhat is the
+    third ROW of the rotation matrix, whose entries are the cosines between the
+    wall normal and each of the three body axes. Relabelling the body axes is a
+    symmetry of the superball, and it permutes those three entries, which
+    sum c_a^4 and c_1^2 c_2^2 c_3^2 do not notice. Omega zhat is the third
+    COLUMN, a different vector: it is the body's third axis seen in the lab, and
+    a relabelling changes WHICH axis that is, so K4 built from it takes
+    twenty-four different values for one physical particle. Both agree at 3/5
+    under an isotropic average and both give +1 for a body axis on the normal,
+    so the mistake is invisible in every test that checks the two ends and shows
+    up only as a wrong S4(z) in an ordered layer.
     """
-    c = np.einsum("nij,j->ni", q_matrix(quat), np.array([0.0, 0.0, 1.0]))
+    c = np.einsum("nji,j->ni", q_matrix(quat), np.array([0.0, 0.0, 1.0]))
     c2 = c * c
     K4 = np.sum(c2 * c2, axis = -1)
     K6 = c2[:, 0] * c2[:, 1] * c2[:, 2]
@@ -620,6 +644,12 @@ def cubatic(state, chain = None):
     in bulk read the largest, and treat a large value with the caution due to a
     maximum taken over three correlated numbers.
 
+    `chain` selects one chain, or averages over all of them when None. Averaging
+    is the right default for a mean, and the wrong thing to do when the question
+    is whether ANY chain has ordered: a single frozen chain in a batch of
+    sixteen moves the average by a sixteenth and reads as noise, so check the
+    chains one at a time before concluding the batch is fluid.
+
     This is the monitor the plastic crystal needs. Near p = 2 the free superball
     fluid freezes into a ROTATOR phase, positions ordered and orientations
     still free, so a translational monitor alone reports order where there is
@@ -628,7 +658,13 @@ def cubatic(state, chain = None):
     """
     R = onp.asarray(q_matrix(state.quat))               # (C, Nmax, 3, 3)
     alive = onp.asarray(state.alive)[..., None]         # (C, Nmax, 1)
-    c2 = R ** 2                                          # rows: lab axes in body
+    if chain is not None:
+        R, alive = R[chain][None], alive[chain][None]
+    # Row i of Omega is Omega^T e_i, lab axis i written in the body frame, so
+    # summing the fourth powers ALONG a row is the cubic invariant. Same
+    # transpose convention as `_cubic_chain`; a column here would give
+    # twenty-four answers for one particle.
+    c2 = R ** 2
     K4 = onp.sum(c2 ** 2, axis = -1)                     # (C, Nmax, 3)
     S4 = 2.5 * (K4 - 0.6)
     n = onp.maximum(alive.sum(axis = (0, 1)), 1)

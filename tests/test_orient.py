@@ -194,6 +194,38 @@ def test_verdicts_are_invariant_under_a_global_rotation(p):
 #  The engine                                                                  #
 # --------------------------------------------------------------------------- #
 
+def test_the_neighbour_gather_does_not_reject_when_it_has_gathered_everybody():
+    """`n_near` is documented as a knob that cannot change the physics, only the
+    acceptance, and the guard that makes that true is a check on the FIRST
+    PARTICLE OUTSIDE the gather: if even that one is within reach, the gather
+    may have dropped a real overlap and the move is refused.
+
+    When the chain's capacity is no larger than `n_near` there is no particle
+    outside the gather, and the entry the guard reads is one the expensive test
+    already examined. Reading it as evidence of truncation refuses every move
+    with a neighbour anywhere inside twice the circumradius — which for cubes is
+    1.73 diameters, so a small dense chain rejects almost everything and samples
+    a fluid of fattened bodies instead of the one asked for.
+
+    Four cubes at 1.2 to 1.5 apart along the axes: legal by a wide margin, all
+    inside 2 r_out = 1.73, and the capacity is exactly `n_near`.
+    """
+    spec = orient.make_spec(H=10.0, Lperp=10.0, z_act=1.0, body=Superball(INF),
+                            geom="bulk", Nmax=4, n_near=4)
+    pos = np.asarray([[1.2, 0.0, 0.0], [0.0, 1.3, 0.0],
+                      [0.0, 0.0, 1.4], [-1.5, 0.0, 0.0]])
+    quat = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (4, 1))
+    alive = np.ones(4, dtype=bool)
+    rc = bodies.circumradius(Superball(INF), 3)
+    assert onp.all(onp.linalg.norm(onp.asarray(pos), axis=1) < 2 * rc)
+    # skip_idx = Nmax is the insertion convention: nobody is skipped, so every
+    # capacity slot is live and the gather has nothing left over to check
+    over = orient._any_overlap(spec, pos, quat, alive,
+                               np.zeros(3), np.asarray([1.0, 0.0, 0.0, 0.0]),
+                               spec.Nmax)
+    assert not bool(over)
+
+
 def test_rotating_a_sphere_is_always_accepted():
     """V0 in one line: a sphere is invariant under rotation, so no rotation
     move can ever be blocked by an overlap. Anything below 100% means the
@@ -272,6 +304,108 @@ def test_cubic_order_parameter_vanishes_for_isotropic_orientations():
     st2 = st._replace(quat=ident, pos=np.zeros((1, 200, 3)),
                       alive=np.ones((1, 200), dtype=bool))
     assert onp.allclose(orient.cubatic(st2), 1.0, atol=1e-9)
+
+
+def _signed_permutations():
+    """The 24 proper rotations of the cube, as signed permutation matrices.
+
+    These are the relabellings of a superball's own axes: applying one on the
+    RIGHT of a rotation matrix leaves the physical particle exactly where it
+    was, which is what makes them the right test of an orientational order
+    parameter.
+    """
+    import itertools
+    out = []
+    for perm in itertools.permutations(range(3)):
+        for sgn in itertools.product((1.0, -1.0), repeat=3):
+            P = onp.zeros((3, 3))
+            for i, pi in enumerate(perm):
+                P[pi, i] = sgn[i]
+            if onp.linalg.det(P) > 0:
+                out.append(P)
+    return out
+
+
+def _quat_of(R):
+    """Unit quaternion of a rotation matrix, host side, for building states."""
+    tr = onp.trace(R)
+    if tr > -0.5:
+        w = onp.sqrt(1.0 + tr) / 2.0
+        return onp.array([w, (R[2, 1] - R[1, 2]) / (4 * w),
+                          (R[0, 2] - R[2, 0]) / (4 * w),
+                          (R[1, 0] - R[0, 1]) / (4 * w)])
+    i = int(onp.argmax(onp.diag(R)))
+    j, k = (i + 1) % 3, (i + 2) % 3
+    s = onp.sqrt(1.0 + R[i, i] - R[j, j] - R[k, k])
+    q = onp.zeros(4)
+    q[0] = (R[k, j] - R[j, k]) / (2 * s)
+    q[i + 1] = s / 2.0
+    q[j + 1] = (R[j, i] + R[i, j]) / (2 * s)
+    q[k + 1] = (R[k, i] + R[i, k]) / (2 * s)
+    return q / onp.linalg.norm(q)
+
+
+def test_the_cubic_profile_reads_the_same_for_all_24_equivalent_quaternions():
+    """S4(z) has to be a function of the PARTICLE, not of the quaternion.
+
+    Orientations are stored raw, and the module says so: the cubic group means
+    twenty-four quaternions describe the same physical superball, and folding
+    them into a representative would cost work every step to buy nothing the
+    sampler needs. The price of that decision is that every orientational
+    observable must be an invariant of the group, and this is the assertion that
+    it is.
+
+    The trap is specific and it is easy to fall into. Omega^T zhat is the wall
+    normal written in the body frame, and sum of its fourth powers is invariant
+    because a relabelling permutes its three entries. Omega zhat is the body's
+    third axis written in the lab, and a relabelling changes WHICH axis that is,
+    so the same particle gives twenty-four different answers spanning -0.67 to
+    -0.25. Both average to zero over an isotropic distribution and both give +1
+    for a body axis along the normal, so a test that checks only those two ends
+    passes either way — which is how the wrong one shipped.
+    """
+    # a particle with a body DIAGONAL along the wall normal: S4 = -2/3, exactly
+    dg = onp.ones(3) / onp.sqrt(3.0)
+    zh = onp.array([0.0, 0.0, 1.0])
+    ax, th = onp.cross(dg, zh), onp.arccos(dg @ zh)
+    ax = ax / onp.linalg.norm(ax)
+    K = onp.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]], [-ax[1], ax[0], 0]])
+    R = onp.eye(3) + onp.sin(th) * K + (1 - onp.cos(th)) * (K @ K)
+
+    quats = onp.stack([_quat_of(R @ P) for P in _signed_permutations()])
+    assert len(quats) == 24
+    spec = orient.make_spec(H=4.0, Lperp=4.0, z_act=1.0, geom="slit")
+    pos = np.tile(np.array([2.0, 2.0, 2.0]), (24, 1))
+    s4, _ = orient._cubic_chain(spec, pos, np.asarray(quats),
+                                np.ones(24, dtype=bool), 4)
+    # all 24 land in the same bin, so the bin's per-particle mean is the value
+    assert onp.abs(onp.asarray(s4).sum() / 24.0 - (-2.0 / 3.0)) < 1e-9
+
+    # ... and one at a time, which is what invariance actually means
+    for q in quats:
+        v4, _ = orient._cubic_chain(spec, pos[:1], np.asarray(q)[None],
+                                    np.ones(1, dtype=bool), 4)
+        assert onp.abs(onp.asarray(v4).sum() - (-2.0 / 3.0)) < 1e-9
+
+
+def test_the_two_cubic_order_parameters_agree_with_each_other():
+    """`cubatic` and the binned S4(z) answer the same question about the same
+    axis, one globally and one per bin, so on a state where every particle sits
+    in one bin they must return the same number. They did not: they used
+    opposite transposes of the rotation matrix, and only one was an invariant.
+    """
+    ks = jax.random.split(jax.random.PRNGKey(12), 500)
+    q = jax.vmap(orient.q_random)(ks)
+    spec = orient.make_spec(H=4.0, Lperp=4.0, z_act=1.0, geom="slit")
+    pos = np.tile(np.array([2.0, 2.0, 2.0]), (500, 1))
+    s4, _ = orient._cubic_chain(spec, pos, q, np.ones(500, dtype=bool), 4)
+    st = orient.OState(pos=pos[None], quat=q[None],
+                       alive=np.ones((1, 500), dtype=bool),
+                       key=np.zeros((1, 2), dtype=np.uint32),
+                       acc=np.zeros((1, 4)), tot=np.zeros((1, 4)),
+                       nhi=np.zeros(1))
+    assert onp.asarray(s4).sum() / 500.0 == pytest.approx(
+        float(orient.cubatic(st)[2]), abs=1e-12)
 
 
 def test_steinhardt_separates_a_lattice_from_a_liquid():

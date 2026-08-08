@@ -550,7 +550,17 @@ def pressure_curve(bulk, d, pexp):
     integral_0^rho1 mu_ex drho = B_2 rho1^2, rather than by extrapolating the
     ladder into a region it does not cover.
     """
-    sel = sorted((r for r in bulk if r["d"] == d and r["p"] == pexp),
+    # Same drift cut as `mu_of_eta`, and for a sharper reason. A chain that
+    # never reached its target activity reports a density far below it while
+    # keeping the mu it was set at, and beta P = rho + rho mu_ex - f_ex reads
+    # that inflated mu_ex directly. Measured against Carnahan-Starling, the
+    # integration is good to half a per cent out to eta = 0.25 and then goes
+    # 3.6%, 26%, 97% across the three stalled points at the top of the ladder.
+    # Those are not dense-fluid physics, they are three chains stuck at the
+    # same density with three different chemical potentials.
+    sel = sorted((r for r in bulk if r["d"] == d and r["p"] == pexp
+                  and r["drift_sigma"] * r["n_err"] / max(r["n_mean"], 1e-12)
+                  <= DRIFT_TOL),
                  key=lambda r: r["rho_mean"])
     rho = onp.array([r["rho_mean"] for r in sel])
     mu = onp.array([r["mu"] for r in sel])
