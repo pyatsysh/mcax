@@ -303,6 +303,45 @@ def stage_bulk():
     return rows
 
 
+# Largest relative density gap between the lattice-start run and its sparse
+# restart for the restart's verdict to be about the SAME state point.
+CONFIRM_GAP = 0.05
+
+
+def resolve_ordering(r):
+    """(verdict, reason) for one ladder point, re-derived from stored fields.
+
+    The confirmation pass as first written asked whether a sparse restart also
+    orders, and treated "no" as proof the trip was an unmelted initial
+    condition. Measured, it said "fluid after all" fourteen times out of
+    fourteen, and the reason was not that fourteen crystals were mirages: the
+    sparse restart could not REACH the density. Gaps ran from 8% to 26%, so the
+    two runs were sitting on opposite sides of the equilibration wall and the
+    comparison was between different state points.
+
+    That failed in the unsafe direction, clearing trips that may have been
+    real. So the restart's verdict now only counts when it arrived somewhere
+    comparable. When it did not, the state is UNDETERMINED, which is treated as
+    ordered for the purpose of capping the training range and is reported as
+    its own category, because "we could not tell" and "we checked and it was
+    fluid" are different claims and only one of them was earned.
+    """
+    if not r.get("ordered_lattice", r.get("ordered", False)):
+        return False, "no trip"
+    e_lat = r.get("eta_mean", 0.0)
+    e_sp = r.get("eta_mean_dilute")
+    if e_sp is None:
+        return True, "trip, no confirmation run"
+    gap = abs(e_lat - e_sp) / max(e_lat, 1e-12)
+    if gap > CONFIRM_GAP:
+        return True, (f"UNDETERMINED: restart reached eta {e_sp:.4f} against "
+                      f"{e_lat:.4f}, a {gap:.0%} gap, so the two runs are not "
+                      f"the same state point")
+    if r.get("ordered_dilute"):
+        return True, "trip confirmed from a sparse restart at matched density"
+    return False, f"trip cleared: restart at matched density ({gap:.0%}) is fluid"
+
+
 def eta_max_table(bulk):
     """eta_max(d, p): the ordering onset from the ladder, less a safety margin.
 
@@ -318,6 +357,8 @@ def eta_max_table(bulk):
         for p in P_GRID:
             sel = sorted((r for r in bulk if r["d"] == d and r["p"] == p),
                          key=lambda r: r["eta_mean"])
+            for r in sel:
+                r["ordered"], r["ordering_reason"] = resolve_ordering(r)
             trip = [r["eta_mean"] for r in sel if r["ordered"]]
             top = max((r["eta_mean"] for r in sel), default=0.0)
             onset = min(trip) if trip else None
@@ -325,7 +366,9 @@ def eta_max_table(bulk):
                 d=d, p=pname(p), onset=onset,
                 eta_max=round((onset - ORDER_MARGIN) if onset else top, 4),
                 found=onset is not None, ladder_top=round(top, 4),
-                n_ordered=len(trip))
+                n_ordered=len(trip),
+                n_undetermined=sum(1 for r in sel
+                                   if "UNDETERMINED" in r.get("ordering_reason", "")))
     return out
 
 
@@ -631,7 +674,47 @@ def a2_cube_two_box_sizes(bulk):
 #  Manifest                                                                    #
 # --------------------------------------------------------------------------- #
 
+def reconcile(mc, etamax):
+    """Re-apply the freezing guard to states already on disk.
+
+    `stage_confined` decides what to skip from the eta_max table it holds in
+    memory, so a long run keeps whatever caps it started with. That is the right
+    behaviour for a resumable campaign and the wrong one after the guard has
+    been corrected mid-flight, which is what happened here: the ordering
+    verdicts were being cleared by a confirmation pass that had not earned them,
+    the caps were consequently far too generous, and states were generated that
+    should not have been.
+
+    Rather than discard the runs, they are RELABELLED here, from the fields each
+    state already carries. A state above its corrected cap, or one whose own
+    ordering monitor tripped, moves out of `train` and into `flagged` with the
+    reason attached. Nothing is deleted and nothing is quietly kept: the data is
+    on disk either way and the manifest says which side of the line it is on.
+    """
+    out = []
+    for s in mc:
+        cap = etamax.get(f"d{s['d']}_p{s['p'] if isinstance(s['p'], str) else pname(s['p'])}",
+                         {}).get("eta_max")
+        why = []
+        if cap is not None and s.get("eta_reservoir", 0.0) > cap:
+            why.append(f"reservoir eta {s['eta_reservoir']:.2f} above the "
+                       f"corrected eta_max {cap:.3f}")
+        if s.get("ordered"):
+            why.append(f"ordering monitor tripped, S/N = "
+                       f"{s.get('s_max_over_n', float('nan')):.3f}")
+        rel = s["drift_sigma"] * s["n_err"] / max(s["n_mean"], 1e-12)
+        if rel > DRIFT_TOL:
+            why.append(f"relative drift {rel:.1%}")
+        if why:
+            s["split_original"] = s["split"]
+            s["split"] = "flagged"
+            s["flag_reason"] = "; ".join(why)
+            out.append(s)
+    return out
+
+
 def write_manifest(bulk, mc, excluded, etamax):
+    flagged = reconcile(mc, etamax)
     a1 = a1_second_virial(bulk)
     a2 = a2_cube_two_box_sizes(bulk)
     a3 = a3_contact_theorem(mc, bulk)
@@ -649,6 +732,7 @@ def write_manifest(bulk, mc, excluded, etamax):
         order_trip=order.ORDER_TRIP, order_margin=ORDER_MARGIN,
         eta_max=etamax, splits=splits,
         n_bulk=len(bulk), n_states=len(mc), n_excluded=len(excluded),
+        n_flagged=len(flagged),
         acceptance=dict(A1_b2=a1, A2_cube_size=a2, A3_contact=a3,
                         gibbs_duhem=gd),
         bulk=[{k: v for k, v in r.items() if k not in ("z", "rho")}
@@ -710,12 +794,19 @@ def write_manifest(bulk, mc, excluded, etamax):
       "sparser start with twice the burn, and has to order again from below. "
       "The lattice prefill starts every dense chain on a crystal, so a single "
       "run cannot tell an unmelted initial condition from a real transition.\n")
-    A("| d | p | onset | eta_max | ladder top | ordered points |")
-    A("|---|---|---|---|---|---|")
+    A("| d | p | onset | eta_max | ladder top | ordered | undetermined |")
+    A("|---|---|---|---|---|---|---|")
     for k, v in etamax.items():
         on = f"{v['onset']:.4f}" if v["found"] else "none found"
         A(f"| {v['d']} | {v['p']} | {on} | {v['eta_max']:.4f} | "
-          f"{v['ladder_top']:.4f} | {v['n_ordered']} |")
+          f"{v['ladder_top']:.4f} | {v['n_ordered']} | "
+          f"{v['n_undetermined']} |")
+    A("")
+    A("An **undetermined** point tripped from a lattice start and its sparse "
+      "restart could not reach a comparable density, so the restart was "
+      "measuring a different state point and cleared nothing. Those count as "
+      "ordered for the cap. They are the equilibration wall showing up inside "
+      "the freezing guard, not a second phenomenon.")
     A("")
     if excluded:
         A(f"**{len(excluded)} states excluded** by the guard, listed rather "
@@ -778,9 +869,21 @@ def write_manifest(bulk, mc, excluded, etamax):
                    ("test_state", "unseen packing fraction, deeper than trained"),
                    ("test_width", "unseen slit width — the extrapolation axis"),
                    ("test_shape", "**an entire unseen exponent**, p = 3"),
-                   ("test_box", "cuboid cavity, hard on every face")):
+                   ("test_box", "cuboid cavity, hard on every face"),
+                   ("flagged", "**generated, then relabelled** by the corrected "
+                               "guard: above the cap, ordered, or drifting")):
         A(f"| `{k}` | {lbl} | {splits.get(k, 0)} |")
     A("")
+    if flagged:
+        A(f"### {len(flagged)} states relabelled `flagged`\n")
+        A("Generated before the freezing guard was corrected mid-campaign, and "
+          "kept rather than deleted so the decision is auditable. Do not train "
+          "on these.\n")
+        A("| state | was | reason |")
+        A("|---|---|---|")
+        for s_ in flagged:
+            A(f"| `{s_['tag']}` | {s_['split_original']} | {s_['flag_reason']} |")
+        A("")
     A("## Quality control\n")
     A("Every state carries an independent-replica error bar (chain-to-chain "
       "scatter), a drift diagnostic (shift of <N> between the first and last "
