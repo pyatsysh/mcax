@@ -154,6 +154,55 @@ def test_burn_in_grows_with_the_system_rather_than_shrinking_per_particle():
     assert camp.burn_for(1.0) == camp.NBURN         # floor for tiny cavities
 
 
+def test_mu_of_eta_does_not_sit_on_a_chord():
+    """beta mu(eta) is convex, so a straight line between ladder rungs lies
+    above the curve everywhere between them — the same bias `pressure_at` was
+    cured of, in the function that sets EVERY confined state's activity. On
+    the production rung spacing the chord overshoots by delta mu up to +0.19
+    at the dense end, a reservoir label wrong by up to +1.2%, zero on rungs
+    and maximal mid-gap. The quadratic-on-mu_ex route must beat it by an
+    order of magnitude at every off-rung target the campaign uses."""
+    rows = synthetic_ladder(3, ETAS_3D)
+    f = camp.mu_of_eta(rows, 3, 2.0)
+    for eta in (0.15, 0.20, 0.30):                    # all between rungs
+        exact = float(eos.mu_of_rho(3, eta / eos.B[3]))
+        e = onp.array([r["eta_mean"] for r in rows])
+        m = onp.array([r["mu"] for r in rows])
+        chord = float(onp.interp(eta, e, m))
+        assert abs(f(eta) - exact) < 0.1 * abs(chord - exact), \
+            f"eta={eta}: quadratic {f(eta) - exact:+.4f} vs chord " \
+            f"{chord - exact:+.4f}"
+    # and on a rung both are exact, so nothing regressed there
+    assert f(0.25) == pytest.approx(eos.mu_of_rho(3, 0.25 / eos.B[3]),
+                                    abs=1e-6)
+
+
+def test_the_prefill_lattice_saturates_and_the_dense_rungs_start_short():
+    """A cubic lattice of pitch 1.05 in a periodic box of edge 8 holds
+    floor(8/1.05)^3 = 343 sites and not one more, which is eta = 0.351 for
+    spheres: the eta = 0.40 and 0.46 ladder rungs can NEVER be seated at 98%
+    of target. They start 12% and 24% short and must close the gap one
+    accepted insertion at a time, which is the initial condition behind the
+    'equilibration wall' at the top of every d = 3 ladder. `lattice_fill`
+    truncates silently by design (variance reduction must not crash a run),
+    so the campaign records the seated count next to the requested one, and
+    this test is what keeps that mechanism from being forgotten."""
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    from mcax import make_spec, lattice_fill, geometry
+    spec = make_spec(3, H=8.0, Lperp=8.0, z_act=1.0, geom="bulk",
+                     shape=shapes.Superball(2.0))
+    v = shapes.volume(shapes.Superball(2.0), 3)
+    n_t = 0.46 / v * geometry.volume(spec)
+    asked = int(0.98 * n_t)
+    seated = len(lattice_fill(spec, asked))
+    assert seated == 343                     # floor(8 / 1.05)^3, the hard cap
+    assert seated < asked                    # the 0.46 rung starts 24% short
+    # and a rung the lattice CAN seat is seated in full
+    n_low = int(0.98 * 0.32 / v * geometry.volume(spec))
+    assert len(lattice_fill(spec, n_low)) == n_low
+
+
 def test_b2_is_the_exact_one_for_every_shape_in_the_grid():
     """The one closed-form equation-of-state coefficient available across the
     family, and the anchor the Gibbs-Duhem integral starts from below its first

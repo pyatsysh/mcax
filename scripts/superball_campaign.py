@@ -46,7 +46,8 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
-from mcax import make_spec, burn_and_sample, eos, geometry, order, shapes
+from mcax import (make_spec, burn_and_sample, eos, geometry, lattice_fill,
+                  order, shapes, diagnostics)
 from mcax.shapes import Superball
 
 INF = float("inf")
@@ -221,10 +222,30 @@ def sample(spec, seed, n_burn, n_run, thin, nbins, n0, kvecs, tag):
     # profile is stored.
     contact, contact_err = (contact_with_error(spec, r) if spec.geom == "slit"
                             else (float("nan"), float("nan")))
+    # What the lattice prefill ACTUALLY seated, not what was asked of it.
+    # `lattice_fill` returns min(n0, sites available), silently: a cubic
+    # lattice of pitch 1.05 in the L = 8 bulk box holds 7^3 = 343 sites, which
+    # is eta = 0.351 for spheres, so the eta = 0.40 and 0.46 rungs START 12%
+    # and 24% below target and have to close the gap one accepted insertion at
+    # a time. Recording the request as the prefill hid exactly the mechanism
+    # behind the stalled ladder tops; now both numbers are on the state.
+    seated = len(lattice_fill(spec, n0, seed)) if n0 > 0 else 0
+    # Cross-chain convergence evidence, per state. The replica error is blind
+    # to a burn systematic all chains share (they all start on the same
+    # prefill); split R-hat halves each chain FIRST, so drift the chains
+    # undergo together still shows up as disagreement. ESS says how many
+    # independent draws the window really held. Recorded, not thresholded:
+    # at these run lengths a converged dense state can honestly read 1.1.
+    dg = diagnostics.summary(r.Ns)
     return dict(
         tag=tag, d=spec.d, p=float(spec.shape.p), geom=spec.geom,
         H=float(spec.H), Lperp=float(spec.Lperp), sigma=float(spec.sigma),
-        z_act=float(spec.z_act), mu=float(onp.log(spec.z_act)), dz=float(DZ),
+        # The bin width this state was ACTUALLY histogrammed at. It was
+        # recorded as the constant DZ, which is right for every slit and box
+        # and wrong by a factor of ten for the bulk rungs (16 bins across the
+        # whole cell); a schema consumer reading `dz` got a fiction there.
+        z_act=float(spec.z_act), mu=float(onp.log(spec.z_act)),
+        dz=float(geometry.extent(spec) / nbins),
         v_particle=float(v1), volume=float(vol),
         z=onp.asarray(r.z), rho=onp.asarray(r.rho),
         n_mean=float(r.n_mean), n_err=chain_error(r.Ns),
@@ -233,7 +254,8 @@ def sample(spec, seed, n_burn, n_run, thin, nbins, n0, kvecs, tag):
         drift_sigma=drift(r.Ns), saturation=float(r.saturation),
         n_hi=int(r.n_hi), capacity=int(r.capacity),
         acc=onp.asarray(r.acc).tolist(), chains=CHAINS, n_run=n_run,
-        n_burn_used=n_burn, n0_prefill=int(n0),
+        n_burn_used=n_burn, n0_prefill=int(n0), n0_seated=int(seated),
+        ess=float(dg["ess"]), split_rhat=float(dg["split_rhat"]),
         s_max=od["s_max"], s_max_err=od["s_max_err"],
         s_max_over_n=od["s_max_over_n"], k_at_max=od["k_at_max"],
         n_kvectors=od["n_kvectors"], ordered=bool(od["ordered"]),
@@ -242,7 +264,34 @@ def sample(spec, seed, n_burn, n_run, thin, nbins, n0, kvecs, tag):
 
 
 def store(path, rows):
-    onp.save(path, onp.array(rows, dtype=object), allow_pickle=True)
+    # Write-then-rename, because this campaign is DESIGNED to be killed and
+    # resumed: `onp.save` straight onto the live file means a kill mid-write
+    # truncates the array and the resume loses everything it was protecting.
+    tmp = path + ".tmp.npy"
+    onp.save(tmp, onp.array(rows, dtype=object), allow_pickle=True)
+    os.replace(tmp, path)
+
+
+def guard_statistics(rows, path):
+    """Refuse to resume a dataset taken at different statistics.
+
+    `--quick` and `--cheap` share tags and ROOT with production, and the skip
+    logic keys on the tag alone, so an 8-chain 4k-step smoke state would be
+    silently kept in a production dataset — feeding `mu_of_eta`, the virial
+    fit and the eta_max table at production — and nothing in the output would
+    say so except one per-state column nobody thresholds.
+    """
+    bad = [r for r in rows
+           if r.get("chains") != CHAINS or r.get("n_run") != NRUN]
+    if bad:
+        b = bad[0]
+        raise SystemExit(
+            f"{path} holds {len(bad)} states at different statistics (e.g. "
+            f"{b['tag']}: chains {b.get('chains')}, n_run {b.get('n_run')}, "
+            f"against this invocation's {CHAINS}/{NRUN}). Mixing smoke and "
+            f"production statistics poisons the ladder and the acceptance "
+            f"tests; point MCAX_SUPERBALL_ROOT somewhere fresh or archive "
+            f"the existing files first.")
 
 
 def load(path):
@@ -350,6 +399,7 @@ def confirm_ordering(spec, st, n_t, kv, tag, nbins):
 def stage_bulk():
     path = os.path.join(ROOT, "bulk_eos.npy")
     rows = load(path)
+    guard_statistics(rows, path)
     done = {r["tag"] for r in rows}
     plan = [(d, p, e) for d in (3, 2) for p in P_GRID for e in BULK_ETA[d]]
     print(f"stage bulk: {len(plan)} ladder points, {len(done)} already done")
@@ -375,10 +425,13 @@ def stage_bulk():
         confirm_ordering(spec, st, n_t, kv, tag, nbins=16)
         rows.append(st)
         store(path, rows)
+        seatflag = (f"  SHORT-SEAT {st['n0_seated']}/{st['n0_prefill']}"
+                    if st["n0_seated"] < st["n0_prefill"] else "")
         print(f"  [{i+1:3d}/{len(plan)}] {tag:<30s} eta={st['eta_mean']:.4f}"
               f" (aim {eta:.2f})  S/N={st['s_max_over_n']:.4f}"
               f"{'  ORDERED' if st['ordered'] else ''}"
-              f"  drift={st['drift_sigma']:4.1f}s  {st['wall_time_s']:5.1f}s")
+              f"  drift={st['drift_sigma']:4.1f}s  {st['wall_time_s']:5.1f}s"
+              f"{seatflag}")
     return rows
 
 
@@ -492,7 +545,12 @@ def usable_ladder(bulk, d, pexp):
     thirty-two climbs from eta 0.3692 to 0.3931 against an exact 0.4000, so it
     is the burn-in, and `burn_for` is where it is fixed rather than here.
     """
+    # `ordered` rungs are excluded outright: a crystal's (mu, rho) is a valid
+    # measurement of the wrong phase, and before this cut the onset rung
+    # itself could serve as the upper interpolation node for activities set
+    # just below eta_max, and as an integration node in `pressure_curve`.
     sel = sorted((r for r in bulk if r["d"] == d and r["p"] == pexp
+                  and not r.get("ordered")
                   and r["drift_sigma"] * r["n_err"] / max(r["n_mean"], 1e-12)
                   <= DRIFT_TOL),
                  key=lambda r: r["mu"])
@@ -522,26 +580,46 @@ def usable_ladder(bulk, d, pexp):
 
 
 def mu_of_eta(bulk, d, p):
-    """A callable eta -> ln z, interpolated on the measured ladder.
+    """A callable eta -> ln z, read off the measured ladder.
 
-    Monotone by construction (the chemical potential increases with density),
-    and interpolated in ln z rather than z because that is the variable the
-    ladder is smooth in. Extrapolation past the top of the ladder is refused:
-    the whole point of the freezing guard is that nothing is invented above the
-    measured range.
+    **Not a chord through (eta, mu).** beta mu(eta) is convex — it rises with
+    the pressure — so linear interpolation between rungs sits ABOVE the curve
+    everywhere between them, and the ladder is coarsest exactly at the dense
+    end. This is the same bias `pressure_at` was cured of, one function over,
+    in the function that sets EVERY confined state's activity: measured on a
+    synthetic ladder built from the exact equations of state, the chord set
+    activities high by up to delta mu = +0.19 mid-gap, which is a reservoir
+    density label wrong by +0.3% to +1.2% — zero on the rungs, maximal between
+    them, so it masquerades as state-dependent physics. The cure is also the
+    same one: split mu into the exact ideal part and a smooth excess, carry
+    mu_ex across by the local quadratic, and add ln rho back analytically.
+
+    Extrapolation past the measured range is still refused: nothing is
+    invented above the ladder top.
     """
     sel = usable_ladder(bulk, d, p)
     if len(sel) < 3:
         raise ValueError(f"fewer than three usable ladder points for d={d} "
                          f"p={pname(p)} after the drift and stall cuts")
     e = onp.array([r["eta_mean"] for r in sel])
-    m = onp.array([r["mu"] for r in sel])
+    rho = onp.array([r["rho_mean"] for r in sel])
+    mux = onp.array([r["mu"] for r in sel]) - onp.log(rho)
+    v = float(onp.mean(e / rho))            # particle volume, same on every row
 
     def f(eta):
         if eta > e[-1] or eta < e[0]:
             raise ValueError(f"eta {eta} outside the measured ladder "
                              f"[{e[0]:.4f}, {e[-1]:.4f}] for d={d} p={pname(p)}")
-        return float(onp.interp(eta, e, m))
+        rho_q = eta / v
+        # A CENTRED window, four nodes where the ladder has them. The
+        # off-centre three-node quadratic that `pressure_curve` uses is fine
+        # under an integral, which smooths its segment error; read pointwise
+        # at the low-density end it left a third of the chord bias in place.
+        k = int(onp.searchsorted(rho, rho_q))
+        lo = max(0, min(k - 2, len(rho) - 4))
+        w = rho[lo:lo + 4]
+        c = onp.polyfit(w, mux[lo:lo + len(w)], len(w) - 1)
+        return float(onp.log(rho_q) + onp.polyval(c, rho_q))
     return f
 
 
@@ -552,6 +630,7 @@ def mu_of_eta(bulk, d, p):
 def stage_confined(bulk, etamax):
     path = os.path.join(ROOT, "mc_states.npy")
     rows = load(path)
+    guard_statistics(rows, path)
     done = {r["tag"] for r in rows}
     excluded = load(os.path.join(ROOT, "excluded.npy"))
     exdone = {r["tag"] for r in excluded}
@@ -573,16 +652,25 @@ def stage_confined(bulk, etamax):
 
     for i, (d, p, geom, H, eta, split) in enumerate(plan):
         tag = f"d{d}_{geom}_H{H:g}_eta{eta:.2f}_p{pname(p)}"
-        if tag in done or tag in exdone:
+        if tag in done:
             continue
+        # An exclusion is NOT permanent: it is re-derived from the current
+        # ladder on every pass. The old order — skip anything in
+        # excluded.npy, then check the cap — froze every verdict at whatever
+        # the ladder looked like when the state was first considered, so a
+        # cap that improved on a re-run could never readmit a state it had
+        # refused. Now the guard runs first and the ledger records its
+        # CURRENT verdict; a state it no longer refuses is generated and
+        # struck off the list.
         cap = etamax[f"d{d}_p{pname(p)}"]["eta_max"]
         if eta > cap:
-            excluded.append(dict(tag=tag, d=d, p=pname(p), geom=geom, H=H,
-                                 eta_target=eta, eta_max=cap,
-                                 reason="target above measured eta_max(p)"))
-            store(os.path.join(ROOT, "excluded.npy"), excluded)
-            print(f"  [{i+1:3d}/{len(plan)}] {tag:<34s} EXCLUDED "
-                  f"(eta {eta} > eta_max {cap})")
+            if tag not in exdone:
+                excluded.append(dict(tag=tag, d=d, p=pname(p), geom=geom, H=H,
+                                     eta_target=eta, eta_max=cap,
+                                     reason="target above measured eta_max(p)"))
+                store(os.path.join(ROOT, "excluded.npy"), excluded)
+                print(f"  [{i+1:3d}/{len(plan)}] {tag:<34s} EXCLUDED "
+                      f"(eta {eta} > eta_max {cap})")
             continue
 
         sh = Superball(p)
@@ -590,11 +678,18 @@ def stage_confined(bulk, etamax):
         try:
             mu = mu_of_eta(bulk, d, p)(eta)
         except ValueError as exc:
-            excluded.append(dict(tag=tag, d=d, p=pname(p), geom=geom, H=H,
-                                 eta_target=eta, reason=str(exc)))
-            store(os.path.join(ROOT, "excluded.npy"), excluded)
-            print(f"  [{i+1:3d}/{len(plan)}] {tag:<34s} EXCLUDED ({exc})")
+            if tag not in exdone:
+                excluded.append(dict(tag=tag, d=d, p=pname(p), geom=geom, H=H,
+                                     eta_target=eta, reason=str(exc)))
+                store(os.path.join(ROOT, "excluded.npy"), excluded)
+                print(f"  [{i+1:3d}/{len(plan)}] {tag:<34s} EXCLUDED ({exc})")
             continue
+        if tag in exdone:
+            excluded = [x for x in excluded if x["tag"] != tag]
+            exdone.discard(tag)
+            store(os.path.join(ROOT, "excluded.npy"), excluded)
+            print(f"  [{i+1:3d}/{len(plan)}] {tag:<34s} previously excluded, "
+                  f"the corrected ladder now admits it")
 
         Lp = H if geom == "box" else LPERP
         spec = make_spec(d, H=H, Lperp=Lp, z_act=float(onp.exp(mu)), geom=geom,
@@ -647,7 +742,11 @@ def a1_second_virial(bulk):
             rho = onp.array([r["rho_mean"] for r in sel])
             lz = onp.array([r["mu"] for r in sel])
             y = (lz - onp.log(rho)) / rho              # -> 2 B2 as rho -> 0
-            err = onp.array([r["n_err"] / r["n_mean"] for r in sel]) / rho
+            # d y / d rho at fixed mu is -(1 + mu_ex) / rho^2, so the factor
+            # (1 + mu_ex) belongs in the propagated error. It was dropped,
+            # which understated the bar by ~10% at the dilute end.
+            err = (1.0 + y * rho) * \
+                onp.array([r["n_err"] / r["n_mean"] for r in sel]) / rho
             c = onp.polyfit(rho, y, 1)
             got = float(c[-1]) / 2.0
             exact = shapes.b2(Superball(p), d, 1.0)
@@ -757,6 +856,12 @@ def pressure_at(bulk, d, pexp, rho_q):
     statistics, and no longer a discretisation.
     """
     g, P = pressure_curve(bulk, d, pexp, dense=True)
+    if not g[0] <= rho_q <= g[-1]:
+        # `onp.interp` clamps to the endpoint silently, and `mu_of_eta`
+        # refuses to extrapolate for exactly this reason; a pressure read off
+        # the end of the ladder is not a pressure at rho_q.
+        raise ValueError(f"rho {rho_q:.4f} outside the integrated ladder "
+                         f"[{g[0]:.4f}, {g[-1]:.4f}] for d={d} p={pname(pexp)}")
     return float(onp.interp(rho_q, g, P))
 
 
@@ -829,7 +934,14 @@ def a3_contact_theorem(mc, bulk):
             if not cands:
                 continue
             s = max(cands, key=lambda x: x["H"])
-            beta_p = pressure_at(bulk, d, pexp, s["rho_b_reservoir"])
+            try:
+                beta_p = pressure_at(bulk, d, pexp, s["rho_b_reservoir"])
+            except ValueError as exc:
+                # A resume can truncate a ladder below a state generated
+                # under an earlier, longer one; better no A3 row than one
+                # evaluated at a clamped density.
+                print(f"  A3 d={d} p={pname(pexp)}: skipped ({exc})")
+                continue
             contact = s.get("contact")
             if contact is None:
                 contact = contact_value(onp.asarray(s["z"]),
@@ -891,15 +1003,25 @@ def a2_cube_two_box_sizes(bulk):
         big = [r for r in sel if r["H"] == BULK_L_DILUTE[d]]
         if not small or not big:
             continue
+        if len(small) < 2:
+            continue
         rho = onp.array([r["rho_mean"] for r in small])
         mu = onp.array([r["mu"] for r in small])
         r0 = big[-1]                                  # densest big-box point
+        # Extrapolate the EXCESS and add ln rho exactly. The densest big-box
+        # rung always sits below the smallest small-box rung, so this branch
+        # always extrapolates across a factor-two density gap — and a linear
+        # extrapolation of the FULL mu carries the chord error of ln rho with
+        # it, which is 0.22 to 0.28 in beta mu here for a PERFECT engine. A2
+        # was reporting that as a size step, and a real step of that size
+        # would have been shrugged off as the known bias.
+        mux = mu - onp.log(rho)
         if r0["rho_mean"] < rho[0]:
-            # extrapolate the small-box curve down one step to compare
-            pred = mu[0] + (r0["rho_mean"] - rho[0]) * (mu[1] - mu[0]) / \
+            mux_p = mux[0] + (r0["rho_mean"] - rho[0]) * (mux[1] - mux[0]) / \
                 (rho[1] - rho[0])
         else:
-            pred = float(onp.interp(r0["rho_mean"], rho, mu))
+            mux_p = float(onp.interp(r0["rho_mean"], rho, mux))
+        pred = float(onp.log(r0["rho_mean"]) + mux_p)
         out.append(dict(d=d, L_small=BULK_L[d], L_big=BULK_L_DILUTE[d],
                         rho=r0["rho_mean"], mu_big=r0["mu"], mu_small=pred,
                         dev=abs(r0["mu"] - pred)))
@@ -963,6 +1085,12 @@ def reconcile(mc, etamax):
 
 
 def write_manifest(bulk, mc, excluded, etamax):
+    # Rows written before `dz` was honest carry the constant DZ whatever they
+    # were binned at; the bin centres do not lie, so re-derive it from them.
+    for r in bulk + mc:
+        z = onp.asarray(r.get("z", []))
+        if len(z) > 1:
+            r["dz"] = float(z[1] - z[0])
     flagged = reconcile(mc, etamax)
     if flagged:
         # `reconcile` relabelled states in memory; put them back on disk before
@@ -1162,16 +1290,30 @@ def write_manifest(bulk, mc, excluded, etamax):
       "Read the RELATIVE drift, not the sigma one: the error bar shrinks as "
       "statistics improve, so a fixed sigma threshold tightens itself and "
       "misorders the states.\n")
-    A("| state | split | <N> | err | drift (rel) | drift (sigma) | S/N | sat |")
-    A("|---|---|---|---|---|---|---|---|")
+    A("`ESS` and `split R-hat` are the cross-chain convergence evidence "
+      "(`mcax.diagnostics`, Stan-style estimators on the N series). The "
+      "replica error cannot see a burn systematic the chains share, because "
+      "every chain starts on the same lattice prefill; split R-hat halves "
+      "each chain first, so common drift still shows up. Read them as "
+      "evidence, not thresholds: a converged dense state at these run "
+      "lengths honestly reads R-hat near 1.1 with an ESS of a few hundred, "
+      "and `n_err` remains a FLOOR on the uncertainty wherever R-hat sits "
+      "well above that.\n")
+    A("| state | split | <N> | err | drift (rel) | drift (sigma) | S/N | sat "
+      "| ESS | split R-hat |")
+    A("|---|---|---|---|---|---|---|---|---|---|")
     for s in sorted(mc, key=lambda x: (x["d"], x["p"], x["geom"], x["H"],
                                        x["eta_reservoir"])):
         rel = s["drift_sigma"] * s["n_err"] / max(s["n_mean"], 1e-12)
         sn = ("n/a" if s["s_max_over_n"] != s["s_max_over_n"]
               else f"{s['s_max_over_n']:.3f}")
+        es = s.get("ess", float("nan"))
+        rh = s.get("split_rhat", float("nan"))
         A(f"| `{s['tag']}` | {s['split']} | {s['n_mean']:.2f} | "
           f"{s['n_err']:.2f} | {rel:.2%} | {s['drift_sigma']:.1f} | {sn} | "
-          f"{s['saturation']:.2f} |")
+          f"{s['saturation']:.2f} | "
+          f"{'n/a' if es != es else f'{es:.0f}'} | "
+          f"{'n/a' if rh != rh else f'{rh:.3f}'} |")
     A("")
     bad = [s for s in mc
            if s["drift_sigma"] * s["n_err"] / max(s["n_mean"], 1e-12) > 0.02]
@@ -1193,6 +1335,23 @@ def write_manifest(bulk, mc, excluded, etamax):
               f"{max(r['eta_mean'] for r in sel):.4f} | "
               f"{max(r['drift_sigma'] for r in sel):.1f} |")
     A("")
+    short = [r for r in bulk
+             if r.get("n0_seated", r.get("n0_prefill", 0)) < r.get("n0_prefill", 0)]
+    if short:
+        A(f"**{len(short)} ladder rungs could not seat their prefill**: the "
+          f"cubic lattice caps at floor(L/1.05)^d sites, eta = 0.351 for "
+          f"spheres in the L = 8 box, so these rungs started well below "
+          f"target and had to climb grand-canonically at sub-percent "
+          f"insertion acceptance. Their stall is an initial-condition "
+          f"artefact on top of the sampling wall, and the usable-ladder cuts "
+          f"are what keep them out of the activity interpolation:\n")
+        A("| rung | asked | seated | seat eta | reached eta |")
+        A("|---|---|---|---|---|")
+        for r in short:
+            se = r["n0_seated"] * r["v_particle"] / r["volume"]
+            A(f"| `{r['tag']}` | {r['n0_prefill']} | {r['n0_seated']} | "
+              f"{se:.4f} | {r['eta_mean']:.4f} |")
+        A("")
     A(f"Total sampling time {man['total_wall_time_s'] / 60:.1f} min "
       f"over {len(bulk)} ladder points and {len(mc)} confined states.\n")
     A("## Files\n")
