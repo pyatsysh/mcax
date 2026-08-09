@@ -206,6 +206,17 @@ def z_guess(d, p, eta):
 def sample(spec, seed, n_burn, n_run, thin, nbins, n0, kvecs, tag):
     """One state point, returned as the schema dict plus its raw profile."""
     t0 = time.time()
+    # Drop the compiled-executable cache before every state. Each state is
+    # its own XLA compilation (spec is a static jit argument, deliberately),
+    # JAX keeps every executable for the life of the process, and a full
+    # campaign is five-hundred-plus of them: the 2026-08-07 re-run died 69
+    # confined states in with `Failed to materialize symbols` inside XLA —
+    # the same exhaustion the test suite hit and fixed in conftest.py, which
+    # the campaign process never got. Nothing is lost by clearing here: no
+    # two states share a compilation, and the burn, the sampling window and
+    # the confirmation re-run of THIS state all still share theirs, because
+    # the clear runs before the state and not between its calls.
+    jax.clear_caches()
     r = burn_and_sample(spec, C=CHAINS, seed=seed, n_burn=n_burn, n_run=n_run,
                         thin=thin, nbins=nbins, n0=n0, kvecs=kvecs)
     v1 = shapes.volume(spec.shape, spec.d, spec.sigma)
