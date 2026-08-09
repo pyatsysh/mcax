@@ -30,9 +30,18 @@ jobs:
       - name: Fast suite
         # The slow marker holds the full EOS validation, which needs minutes
         # per case; it is a release gate, not a per-push one.
+        #
+        # One process per test FILE. Every state point is its own XLA
+        # compilation (`spec` is a static jit argument, deliberately), JAX keeps
+        # every executable alive for the life of the process, and past some
+        # number of them the process aborts inside the compiler rather than
+        # failing a test — taking the run down mid-file and reporting whatever
+        # was already degrading as failures. Measured at fourteen of them, all
+        # passing when re-run per file. `tests/conftest.py` clears the cache
+        # between modules as well; this is the guarantee, not the optimisation.
         env:
           JAX_PLATFORMS: cpu
-        run: pytest -m "not slow" -q
+        run: scripts/run_tests.sh -m "not slow" -q
 
   validate:
     # Full physics validation against Tonks / Henderson / Carnahan-Starling.
@@ -51,4 +60,4 @@ jobs:
           python -m pip install -e ".[test]"
       - env:
           JAX_PLATFORMS: cpu
-        run: pytest -m slow -q
+        run: scripts/run_tests.sh -m slow -q

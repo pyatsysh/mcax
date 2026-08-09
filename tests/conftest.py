@@ -23,6 +23,27 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _release_compiled_executables():
+    """Drop JAX's compiled-executable cache between test modules.
+
+    Every distinct `(spec, nsteps, thin, nbins)` in this suite is a separate
+    compilation — `spec` is a static argument, deliberately, so that two
+    identically-parameterised states share one entry — and JAX keeps every one
+    of them alive for the life of the process. Across a full suite that is
+    hundreds of executables and their buffers, and the process does not fail
+    gracefully when it runs out: XLA aborts inside `backend_compile_and_load`,
+    which pytest cannot catch, so the run dies mid-file and the tests that were
+    already degrading report as FAILURES. Fourteen of them in one measured run,
+    every one passing when the same file was run on its own.
+
+    Clearing per module is the smallest granularity that does not throw away
+    caching within a file, where it is doing real work.
+    """
+    yield
+    jax.clear_caches()
+
+
 def alive_positions(result_or_state, chain: int = 0) -> onp.ndarray:
     """The ``(N, d)`` live particle positions of one chain."""
     st = getattr(result_or_state, "state", result_or_state)

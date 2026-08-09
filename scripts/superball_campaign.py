@@ -118,6 +118,30 @@ PREFILL = 0.98
 
 # Relative drift above which a ladder point is not used to set activities.
 DRIFT_TOL = 0.02
+
+# Attempted moves per particle in the burn-in. With PREFILL at 0.98 the burn is
+# a local relaxation rather than a density change, but it still has to MELT the
+# lattice it was seated on, and that is what sets the number: 13 moves per
+# particle leaves the lattice standing (measured, see `burn_for`), ~110 melts it
+# with room to spare. Only half of these are displacements at p_disp = 0.5.
+BURN_SWEEPS = 220
+
+# Smallest reduced compressibility Var(N)/<N> = S(0) = dln(rho)/d(beta mu) that
+# a hard-particle fluid can have anywhere below freezing. Carnahan-Starling
+# gives 0.068 at eta = 0.37 and does not fall below 0.025 until eta = 0.47, so
+# this floor is thirty times clear of any physics and fires only on a chain that
+# stopped moving in the wrong place. See `usable_ladder`.
+STALL_CHI = 0.005
+
+# How far a ladder point's measured mu_ex may sit ABOVE the value the three
+# points below it predict, before the point is read as a chain that did not
+# reach its density. One-sided on purpose: a stalled chain keeps the mu it was
+# set at and reports a density short of it, which inflates mu_ex and nothing
+# else. Measured across all twelve ladders, the equilibrated points scatter
+# within +/-7% of the prediction and the two top points of every single ladder
+# jump to between +14% and +44%. See `usable_ladder`.
+LADDER_EXCESS = 0.10
+
 DZ = 0.05                  # profile bin width, as in the hard-sphere campaign
 LPERP = 8.0
 
@@ -186,6 +210,17 @@ def sample(spec, seed, n_burn, n_run, thin, nbins, n0, kvecs, tag):
     v1 = shapes.volume(spec.shape, spec.d, spec.sigma)
     vol = geometry.volume(spec)
     od = order.summarise(r, kvecs if kvecs is not None else onp.zeros((0, spec.d)))
+    # rho(0+) and its chain-scatter error. SLIT ONLY, and the restriction is
+    # the sum rule's rather than the code's: rho(contact) = beta P holds for a
+    # planar wall with an otherwise homogeneous fluid beyond it. A cuboid
+    # cavity's z-profile averages the bottom face together with everything the
+    # four side walls are doing to it a diameter away, so the number exists and
+    # is not beta P, and recording it under this name would invite exactly the
+    # comparison it fails. Taken here rather than at manifest time because the
+    # error bar needs the per-chain histogram and only the chain-averaged
+    # profile is stored.
+    contact, contact_err = (contact_with_error(spec, r) if spec.geom == "slit"
+                            else (float("nan"), float("nan")))
     return dict(
         tag=tag, d=spec.d, p=float(spec.shape.p), geom=spec.geom,
         H=float(spec.H), Lperp=float(spec.Lperp), sigma=float(spec.sigma),
@@ -202,6 +237,7 @@ def sample(spec, seed, n_burn, n_run, thin, nbins, n0, kvecs, tag):
         s_max=od["s_max"], s_max_err=od["s_max_err"],
         s_max_over_n=od["s_max_over_n"], k_at_max=od["k_at_max"],
         n_kvectors=od["n_kvectors"], ordered=bool(od["ordered"]),
+        contact=contact, contact_err=contact_err,
         wall_time_s=round(time.time() - t0, 1))
 
 
@@ -236,9 +272,75 @@ def nmax_for(n_target, spec_default):
 
 
 def burn_for(n_target):
-    """Burn-in scaled to system size: the transient is per-particle, not
-    per-step, and the hard-sphere campaign's square-root rule transfers."""
-    return int(NBURN * max(1.0, n_target / 150.0) ** 0.5)
+    """Burn-in scaled to system size, LINEARLY: a fixed number of moves per
+    particle, not a fixed number of steps.
+
+    This was a square-root rule, inherited from the hard-sphere campaign, and
+    the docstring that came with it said in the same breath that the transient
+    is per-particle — which is an argument for a linear rule, not a square-root
+    one. One step is one attempted move on one particle, so under sqrt(N) the
+    moves each particle receives FALL as 1/sqrt(N) and the largest states get
+    the shortest relaxation. Measured on `d3_slit_H16_eta0.30_p2`, the widest
+    slit in the campaign: 587 particles seated on a lattice, 15.8k burn steps,
+    thirteen displacement attempts per particle. The lattice does not melt in
+    thirteen moves, and the ordering monitor duly reported the lattice it had
+    been handed — S_max = 82, S/N = 0.135, over the trip. The same state with
+    the burn multiplied by eight gives S_max = 1.95 and S/N = 0.0032, which is
+    a fluid, at the same density (eta 0.3116 against 0.3084) and from either a
+    dense or a sparse start. The trip was the initial condition.
+
+    So the rule is now moves per particle, and `BURN_SWEEPS` says how many.
+    `NBURN` remains the floor for small states, where the per-particle count is
+    generous anyway and the compile dominates.
+    """
+    return int(max(NBURN, BURN_SWEEPS * max(n_target, 1.0)))
+
+
+# --------------------------------------------------------------------------- #
+#  The ordering confirmation pass, shared by both stages                       #
+# --------------------------------------------------------------------------- #
+
+def confirm_ordering(spec, st, n_t, kv, tag, nbins):
+    """Re-run a tripped state from a sparse start and see whether it orders
+    again. Mutates `st`.
+
+    A trip is not believed on one run, and this is why. The lattice prefill
+    STARTS the chain on a crystal — `PREFILL` of the target seated on a cubic
+    grid, so the burn does not have to fill grand-canonically at 1% acceptance
+    — and a burn too short to melt that grid reports exactly the ordering it
+    was handed. So a tripped state is re-run from a much sparser start with
+    twice the burn, and has to order AGAIN, from below. The transition being
+    barrier-free is what makes that a fair test rather than a lenient one: a
+    genuinely over-compressed fluid orders on its own, with nothing to sit
+    metastable behind.
+
+    **This used to run on the bulk ladder only, and the confined states — the
+    training data itself — went out on a single lattice-started run.** Measured
+    afterwards on `d3_slit_H16_eta0.30_p2`, the widest slit in the campaign:
+    as run it reported S_max = 82 and S/N = 0.135, over the trip, and the
+    ordering was at a wavevector of 2 pi (7) / L, one Bragg order of the prefill
+    grid. The same state with eight times the burn gives S_max = 1.95 and
+    S/N = 0.0032 at the same density, from either a dense or a sparse start.
+    That is a fluid, and six `test_width` states across the shape grid were
+    flagged for a phase transition that was the initial condition. The burn is
+    now long enough to melt the grid (see `burn_for`) AND the confirmation runs
+    on both stages, because either alone has been shown to be insufficient.
+    """
+    st["ordered_lattice"] = bool(st["ordered"])
+    if not st["ordered"]:
+        return st
+    chk = sample(spec, seed=seed_of(tag) + 1, n_burn=2 * burn_for(n_t),
+                 n_run=NRUN, thin=THIN, nbins=nbins, n0=int(0.45 * n_t),
+                 kvecs=kv, tag=tag + "_confirm")
+    st["ordered_dilute"] = bool(chk["ordered"])
+    st["s_max_over_n_dilute"] = chk["s_max_over_n"]
+    st["eta_mean_dilute"] = chk["eta_mean"]
+    st["ordered"], st["ordering_reason"] = resolve_ordering(st)
+    st["wall_time_s"] += chk["wall_time_s"]
+    print(f"      confirm from sparse start: "
+          f"S/N={chk['s_max_over_n']:.4f} eta={chk['eta_mean']:.4f}"
+          f" -> {st['ordering_reason']}")
+    return st
 
 
 # --------------------------------------------------------------------------- #
@@ -270,30 +372,7 @@ def stage_bulk():
                     n0=int(PREFILL * n_t), kvecs=kv, tag=tag)
         st["eta_target"] = float(eta)
         st["role"] = P_ROLE[p]
-        # A trip is not believed on one run. The lattice prefill STARTS the
-        # chain on a crystal, seating 85% of the target on a cubic grid so the
-        # burn does not have to fill grand-canonically at 1% acceptance, and a
-        # burn too short to melt that grid reports exactly the ordering it was
-        # handed. So a state that trips is re-run from a much sparser start
-        # (half the seating, twice the burn) and has to order AGAIN, from
-        # below, before the guard believes it. The transition being
-        # barrier-free is what makes this a fair test rather than a lenient
-        # one: a genuinely over-compressed fluid orders on its own, with
-        # nothing to sit metastable behind.
-        st["ordered_lattice"] = bool(st["ordered"])
-        if st["ordered"]:
-            chk = sample(spec, seed=seed_of(tag) + 1,
-                         n_burn=2 * burn_for(n_t), n_run=NRUN, thin=THIN,
-                         nbins=16, n0=int(0.45 * n_t), kvecs=kv,
-                         tag=tag + "_confirm")
-            st["ordered_dilute"] = bool(chk["ordered"])
-            st["s_max_over_n_dilute"] = chk["s_max_over_n"]
-            st["eta_mean_dilute"] = chk["eta_mean"]
-            st["ordered"] = bool(st["ordered"] and chk["ordered"])
-            st["wall_time_s"] += chk["wall_time_s"]
-            print(f"      confirm from sparse start: "
-                  f"S/N={chk['s_max_over_n']:.4f} eta={chk['eta_mean']:.4f}"
-                  f" -> {'ORDERED' if st['ordered'] else 'fluid after all'}")
+        confirm_ordering(spec, st, n_t, kv, tag, nbins=16)
         rows.append(st)
         store(path, rows)
         print(f"  [{i+1:3d}/{len(plan)}] {tag:<30s} eta={st['eta_mean']:.4f}"
@@ -372,6 +451,76 @@ def eta_max_table(bulk):
     return out
 
 
+def usable_ladder(bulk, d, pexp):
+    """The ladder points that are equilibrium (beta mu, rho) pairs, in density
+    order. Two cuts, and the second makes the one the first cannot.
+
+    **Relative drift** catches a chain still moving when the sampling window
+    closed. It is the scale-free reading: the sigma drift tightens itself as
+    statistics improve and would reject the best runs on the ladder.
+
+    **The stall** catches a chain that has stopped moving in the WRONG PLACE,
+    which the drift test is blind to by construction — a chain sitting against
+    the equilibration wall has a flat <N> series and reports the SMALLEST drift
+    on the ladder. Two consecutive points give the reduced compressibility
+
+        S(0)  =  Var(N)/<N>  =  d ln(rho) / d(beta mu),
+
+    which for a hard-particle fluid below freezing never falls under about
+    0.025. On the campaign's own d = 3, p = 2 ladder the pair at
+    eta 0.3696 -> 0.3710 gives 0.00086: two chains at the same density with
+    chemical potentials four apart, which is not a fluid, it is one chain that
+    could not fill and a second that could not either. That is exactly the pair
+    the Gibbs-Duhem check against Carnahan-Starling reported at 26% and 97%
+    while the drift cut passed both.
+
+    The stalled point and everything above it goes, because a chain that could
+    not reach eta = 0.40 did not reach 0.46 on the way past.
+
+    S(0) alone only catches the pathological end of that. The sharper test is a
+    FORWARD PREDICTION and it needs no reference equation of state, which is
+    what makes it usable off p = 2: fit mu_ex(rho) quadratically on the three
+    points below and see where the next one lands. A stalled chain keeps the mu
+    it was set at while reporting a density short of it, so its mu_ex overshoots
+    and nothing else in the run says so. Measured across all twelve of the
+    campaign's ladders, the equilibrated points scatter within +/-7% of the
+    prediction and the top two points of EVERY ladder jump to +14% ... +44%.
+    Both cuts run, and the first to fire truncates.
+
+    That the top two points of every ladder fail is not a coincidence and not
+    freezing: the same d = 3, p = 2 state re-run with the burn multiplied by
+    thirty-two climbs from eta 0.3692 to 0.3931 against an exact 0.4000, so it
+    is the burn-in, and `burn_for` is where it is fixed rather than here.
+    """
+    sel = sorted((r for r in bulk if r["d"] == d and r["p"] == pexp
+                  and r["drift_sigma"] * r["n_err"] / max(r["n_mean"], 1e-12)
+                  <= DRIFT_TOL),
+                 key=lambda r: r["mu"])
+    out = []
+    for r in sel:
+        if out:
+            dmu = r["mu"] - out[-1]["mu"]
+            chi = (onp.log(max(r["rho_mean"], 1e-300))
+                   - onp.log(max(out[-1]["rho_mean"], 1e-300))) / max(dmu, 1e-12)
+            if dmu > 1e-9 and chi < STALL_CHI:
+                break
+        if len(out) >= 3:
+            rho = onp.array([q["rho_mean"] for q in out[-3:]])
+            mux = onp.array([q["mu"] for q in out[-3:]]) - onp.log(rho)
+            pred = onp.polyval(onp.polyfit(rho, mux, 2), r["rho_mean"])
+            got = r["mu"] - onp.log(max(r["rho_mean"], 1e-300))
+            if got - pred > LADDER_EXCESS * abs(pred):
+                break
+        out.append(r)
+    out.sort(key=lambda r: r["rho_mean"])
+    keep, last = [], -onp.inf
+    for r in out:                                  # strictly increasing in rho
+        if r["rho_mean"] > last + 1e-12:
+            keep.append(r)
+            last = r["rho_mean"]
+    return keep
+
+
 def mu_of_eta(bulk, d, p):
     """A callable eta -> ln z, interpolated on the measured ladder.
 
@@ -381,22 +530,12 @@ def mu_of_eta(bulk, d, p):
     the whole point of the freezing guard is that nothing is invented above the
     measured range.
     """
-    # A ladder point whose <N> is still moving is not a state point, it is a
-    # snapshot of a chain on its way somewhere, and interpolating through it
-    # puts the wrong activity on every confined state that reads off it. The
-    # test is RELATIVE drift, which is the scale-free one: the sigma drift
-    # tightens itself as statistics improve and would reject the best runs.
-    sel = sorted((r for r in bulk if r["d"] == d and r["p"] == p
-                  and r["drift_sigma"] * r["n_err"] / max(r["n_mean"], 1e-12)
-                  <= DRIFT_TOL),
-                 key=lambda r: r["eta_mean"])
+    sel = usable_ladder(bulk, d, p)
     if len(sel) < 3:
         raise ValueError(f"fewer than three usable ladder points for d={d} "
-                         f"p={pname(p)} after the drift cut")
+                         f"p={pname(p)} after the drift and stall cuts")
     e = onp.array([r["eta_mean"] for r in sel])
     m = onp.array([r["mu"] for r in sel])
-    keep = onp.concatenate([[True], onp.diff(e) > 1e-9])   # strictly increasing
-    e, m = e[keep], m[keep]
 
     def f(eta):
         if eta > e[-1] or eta < e[0]:
@@ -471,6 +610,8 @@ def stage_confined(bulk, etamax):
                     n0=int(PREFILL * n_t), kvecs=kv, tag=tag)
         st.update(eta_reservoir=float(eta), split=split, role=P_ROLE[p],
                   rho_b_reservoir=float(eta / v))
+        confirm_ordering(spec, st, n_t, kv, tag,
+                         nbins=max(int(round(H / DZ)), 8))
         rows.append(st)
         store(path, rows)
         flag = " DRIFT" if st["drift_sigma"] > 3.0 else ""
@@ -524,7 +665,7 @@ def a1_second_virial(bulk):
     return out
 
 
-def pressure_curve(bulk, d, pexp):
+def pressure_curve(bulk, d, pexp, dense=False):
     """(rho, beta P) along a measured ladder, by Gibbs-Duhem.
 
     beta P = integral rho d(beta mu) is the only route to a pressure here,
@@ -549,29 +690,74 @@ def pressure_curve(bulk, d, pexp):
     The segment below the first measured point is done with the exact virial,
     integral_0^rho1 mu_ex drho = B_2 rho1^2, rather than by extrapolating the
     ladder into a region it does not cover.
+
+    The ladder comes from `usable_ladder`, which cuts on relative drift and on
+    the stall the drift test cannot see. Before that cut this integration read
+    3.6%, 26% and 97% against Carnahan-Starling across the top three points of
+    the d = 3, p = 2 ladder, and the comment here recorded those numbers as
+    though the cut had removed them; it had not, because a stalled chain has
+    the smallest drift on the ladder, not the largest.
+
+    `dense = True` refines the quadrature onto a fine grid, carrying mu_ex
+    across by a local quadratic. Nothing new is measured: it removes the
+    trapezoid's discretisation, which is what `pressure_at` needs and what the
+    node-by-node table in `gibbs_duhem_against_reference` must not have.
     """
-    # Same drift cut as `mu_of_eta`, and for a sharper reason. A chain that
-    # never reached its target activity reports a density far below it while
-    # keeping the mu it was set at, and beta P = rho + rho mu_ex - f_ex reads
-    # that inflated mu_ex directly. Measured against Carnahan-Starling, the
-    # integration is good to half a per cent out to eta = 0.25 and then goes
-    # 3.6%, 26%, 97% across the three stalled points at the top of the ladder.
-    # Those are not dense-fluid physics, they are three chains stuck at the
-    # same density with three different chemical potentials.
-    sel = sorted((r for r in bulk if r["d"] == d and r["p"] == pexp
-                  and r["drift_sigma"] * r["n_err"] / max(r["n_mean"], 1e-12)
-                  <= DRIFT_TOL),
-                 key=lambda r: r["rho_mean"])
+    sel = usable_ladder(bulk, d, pexp)
+    if len(sel) < 2:
+        raise ValueError(f"fewer than two usable ladder points for d={d} "
+                         f"p={pname(pexp)}: there is no curve to integrate")
     rho = onp.array([r["rho_mean"] for r in sel])
-    mu = onp.array([r["mu"] for r in sel])
-    keep = onp.concatenate([[True], onp.diff(rho) > 1e-12])
-    rho, mu = rho[keep], mu[keep]
+    mu_ex = onp.array([r["mu"] for r in sel]) - onp.log(rho)
+    if dense and len(rho) >= 3:
+        rho, mu_ex = _mu_ex_dense(rho, mu_ex)
     b2 = shapes.b2(Superball(pexp), d, 1.0)
-    mu_ex = mu - onp.log(rho)
-    f_ex = onp.concatenate([[b2 * rho[0] ** 2], b2 * rho[0] ** 2 + onp.cumsum(
+    f_ex = b2 * rho[0] ** 2 + onp.concatenate([[0.0], onp.cumsum(
         0.5 * (mu_ex[1:] + mu_ex[:-1]) * onp.diff(rho))])
-    P = rho + rho * mu_ex - f_ex
-    return rho, P
+    return rho, rho + rho * mu_ex - f_ex
+
+
+def _mu_ex_dense(rho, mu_ex, n=4001):
+    """(grid, mu_ex on it) by piecewise-QUADRATIC interpolation on three nodes.
+
+    Linear would be defensible for mu_ex itself, which is smooth and nearly
+    straight at low density. What it does not survive is what the caller does
+    next: integrate it, then subtract the integral from something of the same
+    size, where a chord's error has nothing to cancel against.
+    """
+    g = onp.linspace(rho[0], rho[-1], n)
+    j = onp.clip(onp.searchsorted(rho, g) - 1, 0, len(rho) - 3)
+    out = onp.empty_like(g)
+    for k in range(len(rho) - 2):
+        m = j == k
+        if m.any():
+            out[m] = onp.polyval(onp.polyfit(rho[k:k + 3], mu_ex[k:k + 3], 2),
+                                 g[m])
+    return g, out
+
+
+def pressure_at(bulk, d, pexp, rho_q):
+    """beta P at one density, read off the measured ladder.
+
+    **Not `onp.interp` on the pressure**, which is what this was, and which put
+    a bias into every A3 row. beta P(rho) is strongly convex — it rises like
+    1/(1 - eta)^3 — so a chord between two ladder points lies ABOVE the curve
+    everywhere between them, and the ladder is coarsest exactly where the
+    curvature is largest.
+
+    Measured at p = 2, where the answer is known independently. The campaign's
+    d = 3 ladder brackets the A3 slit state's reservoir density with eta = 0.12
+    and eta = 0.18; the chord across them reads beta P = 0.5644 against
+    Carnahan-Starling's 0.5454, high by 3.5%. In d = 2 it is 2.2% high against
+    Henderson. That bias does not depend on the shape, so it entered all twelve
+    A3 rows as a deviation the engine had not committed.
+
+    Integrating on a dense grid instead, with mu_ex carried across by the local
+    quadratic above, gives 0.5435 (-0.35%) and 0.7833 (-0.64%): the ladder's own
+    statistics, and no longer a discretisation.
+    """
+    g, P = pressure_curve(bulk, d, pexp, dense=True)
+    return float(onp.interp(rho_q, g, P))
 
 
 def contact_value(z, rho, nfit=6):
@@ -588,6 +774,34 @@ def contact_value(z, rho, nfit=6):
     return float(onp.polyval(c, 0.0))
 
 
+def contact_with_error(spec, result, nfit=6):
+    """(rho(0+), standard error) with the error taken from the chain scatter.
+
+    The mean alone is not a testable number, and A3 was reading it as one.
+    Extrapolating a quadratic past the end of the data amplifies whatever noise
+    is in the bins it is fitted to, and at DZ = 0.05 in a 240-bin profile that
+    noise is several per cent per bin — not the 0.2% the <N> error bar suggests,
+    because <N> averages 240 bins and the contact value uses six of them and
+    then leans outward. So a 10% A3 deviation and a 4% one may be the same
+    number twice, and without this there is no way to say.
+
+    The chains are independent by construction, so their scatter is an honest
+    standard error with no autocorrelation model in it: the same argument the
+    rest of the campaign's error bars rest on, applied one bin at a time.
+    """
+    h = onp.asarray(result.hist, dtype=float)               # (C, nbins) counts
+    cell = geometry.bin_volume(spec, h.shape[-1])
+    dz = geometry.extent(spec) / h.shape[-1]
+    z = (onp.arange(h.shape[-1]) + 0.5) * dz
+    per_chain = onp.array([contact_value(z, h[c] / (result.nsamples * cell),
+                                         nfit) for c in range(h.shape[0])])
+    mean = contact_value(z, h.sum(axis=0) / (h.shape[0] * result.nsamples * cell),
+                         nfit)
+    err = (float(per_chain.std(ddof=1) / onp.sqrt(len(per_chain)))
+           if len(per_chain) > 1 else float("nan"))
+    return float(mean), err
+
+
 def a3_contact_theorem(mc, bulk):
     """rho(contact) = beta P at a hard wall, exact for parallel walls and any
     particle shape, checked at one slit state per (d, p).
@@ -596,25 +810,38 @@ def a3_contact_theorem(mc, bulk):
     every member of the family and is the sharpest single check that the
     engine and the measured equation of state agree with each other. mcax's
     walls act on CENTRES, so it applies literally and no shift enters.
+
+    Two things it is NOT, both of which it was being read as. It is not a test
+    of the engine alone: beta P comes from integrating the measured ladder, so a
+    deviation is shared between the sum rule and that integration, and the p = 2
+    row is the only one where the two can be separated. And it is not a test at
+    all without an error bar — see `contact_with_error`. `dev_sigma` is the
+    number to read; `dev_rel` on its own cannot tell 10% from 4%.
     """
     out = []
     for d in (3, 2):
         for pexp in P_GRID:
-            sel = [r for r in bulk if r["d"] == d and r["p"] == pexp]
-            if len(sel) < 4:
+            if len(usable_ladder(bulk, d, pexp)) < 4:
                 continue
-            rho, P = pressure_curve(bulk, d, pexp)
             cands = [s for s in mc if s["d"] == d and s["p"] == pexp
                      and s["geom"] == "slit"
                      and s["split"] in ("train", "test_shape")]
             if not cands:
                 continue
             s = max(cands, key=lambda x: x["H"])
-            beta_p = float(onp.interp(s["rho_b_reservoir"], rho, P))
-            contact = contact_value(onp.asarray(s["z"]), onp.asarray(s["rho"]))
-            row = dict(d=d, p=pname(pexp), tag=s["tag"], contact=contact,
+            beta_p = pressure_at(bulk, d, pexp, s["rho_b_reservoir"])
+            contact = s.get("contact")
+            if contact is None:
+                contact = contact_value(onp.asarray(s["z"]),
+                                        onp.asarray(s["rho"]))
+            cerr = float(s.get("contact_err", float("nan")))
+            row = dict(d=d, p=pname(pexp), tag=s["tag"], contact=float(contact),
+                       contact_err=cerr,
                        bin0=float(onp.asarray(s["rho"])[0]), beta_p=beta_p,
-                       dev_rel=abs(contact - beta_p) / max(beta_p, 1e-12))
+                       dev_rel=abs(contact - beta_p) / max(beta_p, 1e-12),
+                       dev_sigma=(abs(contact - beta_p) / cerr
+                                  if cerr == cerr and cerr > 0
+                                  else float("nan")))
             if pexp == 2.0:
                 # At p = 2 the pressure is known independently, so the sum rule
                 # can be checked against it and the integration taken out of
@@ -638,8 +865,7 @@ def gibbs_duhem_against_reference(bulk):
     """
     out = []
     for d in (3, 2):
-        sel = [r for r in bulk if r["d"] == d and r["p"] == 2.0]
-        if len(sel) < 4:
+        if len(usable_ladder(bulk, d, 2.0)) < 4:
             continue
         rho, P = pressure_curve(bulk, d, 2.0)
         for i in range(1, len(rho)):
@@ -700,6 +926,15 @@ def reconcile(mc, etamax):
     ordering monitor tripped, moves out of `train` and into `flagged` with the
     reason attached. Nothing is deleted and nothing is quietly kept: the data is
     on disk either way and the manifest says which side of the line it is on.
+
+    **The relabelling has to reach the array, not only the manifest.** This
+    mutates `mc` in place and `write_manifest` writes `mc_states.npy` back out
+    afterwards. It did not, and that was the whole of the protection failing:
+    the manifest declared eighteen states `flagged`, five of them out of
+    `train`, while `mc_states.npy` — the file `dimint-dft` actually loads —
+    still labelled all 183 as it had generated them. A consumer selecting
+    `split == "train"` got 91 states including five the manifest said must not
+    be trained on, and nothing in the data it loaded said so.
     """
     out = []
     for s in mc:
@@ -716,7 +951,11 @@ def reconcile(mc, etamax):
         if rel > DRIFT_TOL:
             why.append(f"relative drift {rel:.1%}")
         if why:
-            s["split_original"] = s["split"]
+            # `setdefault`, not assignment: now that the relabelling is written
+            # back to disk, this runs a second time over states that already
+            # say `flagged`, and a plain assignment would record their original
+            # split as `flagged` and lose it for good.
+            s.setdefault("split_original", s["split"])
             s["split"] = "flagged"
             s["flag_reason"] = "; ".join(why)
             out.append(s)
@@ -725,6 +964,13 @@ def reconcile(mc, etamax):
 
 def write_manifest(bulk, mc, excluded, etamax):
     flagged = reconcile(mc, etamax)
+    if flagged:
+        # `reconcile` relabelled states in memory; put them back on disk before
+        # anything else, so the array and the manifest cannot disagree about
+        # which states are trainable. See the note in `reconcile`.
+        store(os.path.join(ROOT, "mc_states.npy"), mc)
+        print(f"  reconcile: {len(flagged)} states relabelled `flagged` and "
+              f"written back to mc_states.npy")
     a1 = a1_second_virial(bulk)
     a2 = a2_cube_two_box_sizes(bulk)
     a3 = a3_contact_theorem(mc, bulk)
@@ -851,20 +1097,35 @@ def write_manifest(bulk, mc, excluded, etamax):
       "for parallel walls whatever the particle shape. The pressure comes from "
       "the measured ladder by Gibbs-Duhem, since no reference equation of "
       "state exists off p = 2.\n")
-    A("| d | p | state | rho(contact) | first bin | beta P | rel. dev | "
-      "exact beta P (dev) |")
-    A("|---|---|---|---|---|---|---|---|")
+    A("| d | p | state | rho(contact) | err | first bin | beta P | rel. dev | "
+      "sigma | exact beta P (dev) |")
+    A("|---|---|---|---|---|---|---|---|---|---|")
     for r in a3:
         ref = (f"{r['beta_p_reference']:.4f} ({r['dev_rel_reference']:.2%})"
                if "beta_p_reference" in r else "n/a")
-        A(f"| {r['d']} | {r['p']} | `{r['tag']}` | {r['contact']:.4f} | "
-          f"{r['bin0']:.4f} | {r['beta_p']:.4f} | {r['dev_rel']:.2%} | {ref} |")
+        ce = ("n/a" if r.get("contact_err", float("nan")) != r.get("contact_err")
+              else f"{r['contact_err']:.4f}")
+        ds = ("n/a" if r.get("dev_sigma", float("nan")) != r.get("dev_sigma")
+              else f"{r['dev_sigma']:.1f}")
+        A(f"| {r['d']} | {r['p']} | `{r['tag']}` | {r['contact']:.4f} | {ce} | "
+          f"{r['bin0']:.4f} | {r['beta_p']:.4f} | {r['dev_rel']:.2%} | {ds} | "
+          f"{ref} |")
     A("")
-    A("The pressure is the integrated one, so a deviation here is shared "
-      "between the sum rule and the integration that produced beta P. The two "
-      "are separated at p = 2, where the fluid is hard spheres or hard discs "
-      "and the integration can be checked against Carnahan-Starling and "
-      "Henderson directly:\n")
+    A("**Read the sigma column, not the per cent.** rho(0+) is a quadratic "
+      "extrapolated past the end of the profile, which amplifies the per-bin "
+      "noise; the <N> error bar does not describe it, because <N> averages "
+      "every bin and this uses six of them and then leans outward. The error "
+      "quoted is the chain-to-chain scatter of the same extrapolation.\n")
+    A("beta P is the ladder's integral evaluated at the reservoir density on a "
+      "refined grid, NOT a chord between the two ladder points that bracket it. "
+      "beta P(rho) is strongly convex and the chord sits above it: at p = 2 in "
+      "d = 3 that read 3.5% high against Carnahan-Starling and in d = 2 2.2% "
+      "high against Henderson, the same bias at every p, and it was being "
+      "reported as an engine deviation.\n")
+    A("What remains is shared between the sum rule and the integration that "
+      "produced beta P. The two are separated at p = 2, where the fluid is hard "
+      "spheres or hard discs and the integration can be checked against "
+      "Carnahan-Starling and Henderson directly:\n")
     A("| d | eta | beta P integrated | reference | rel. dev |")
     A("|---|---|---|---|---|")
     for r in gd:
@@ -963,17 +1224,32 @@ def main():
         global P_GRID, P_ROLE, BULK_ETA, SLIT_TRAIN, SLIT_HELD, BOX_STATES
         P_GRID = [2.0, 3.0]
         P_ROLE = {2.0: "train", 3.0: "test_shape"}
-        BULK_ETA = {3: [0.02, 0.10, 0.25, 0.40], 2: [0.04, 0.20, 0.45]}
+        # Six rungs, three of them below eta = 0.10, and the shape of that is
+        # forced from two directions. The stall cut needs three points below it
+        # before it can predict the fourth and truncates from the first failure
+        # upwards, so a short ladder that loses its top has nothing left and
+        # `mu_of_eta` refuses every confined state. And A1 fits its B2 intercept
+        # on the rungs at eta <= 0.10, so with fewer than three of those the
+        # virial table comes out empty. The first draft of this had four rungs
+        # and three, and produced a manifest with no acceptance tests in it at
+        # all, which is not a smoke test of anything.
+        BULK_ETA = {3: [0.01, 0.04, 0.08, 0.16, 0.26, 0.34],
+                    2: [0.02, 0.06, 0.10, 0.20, 0.30, 0.40]}
         SLIT_TRAIN = {3: [(6.0, 0.15)], 2: [(6.0, 0.30)]}
         SLIT_HELD = {3: [(5.0, 0.25, "test_width")],
                      2: [(5.0, 0.45, "test_width")]}
         BOX_STATES = {3: [(1.6, 0.25)], 2: [(1.6, 0.40)]}
 
-    global CHEAP, CHAINS, NRUN, NBURN, THIN
+    global CHEAP, CHAINS, NRUN, NBURN, THIN, BURN_SWEEPS
     CHEAP = args.cheap
     CHAINS = 8 if CHEAP else 32
-    NRUN = 20_000 if CHEAP else 20_000
-    NBURN = 5_000 if CHEAP else 8_000
+    # `NRUN` read `20_000 if CHEAP else 20_000`, so the sampling window never
+    # shrank and only the chain count and the burn floor did. The smoke run was
+    # costing most of a production one, which is the sort of thing that stops a
+    # smoke run being used.
+    NRUN = 4_000 if CHEAP else 20_000
+    NBURN = 2_000 if CHEAP else 8_000
+    BURN_SWEEPS = 40 if CHEAP else BURN_SWEEPS
     THIN = 50
 
     os.makedirs(ROOT, exist_ok=True)
@@ -1000,13 +1276,21 @@ def main():
     print(f"\nwrote {ROOT}/manifest.json + MANIFEST.md")
     print("splits: " + ", ".join(f"{k}={v}" for k, v in
                                  sorted(man["splits"].items())))
-    for name, rows in man["acceptance"].items():
-        if name == "A1_b2":
-            worst = max((r["dev_rel"] for r in rows), default=0.0)
-            print(f"A1 second virial: worst relative deviation {worst:.2%}")
-        if name == "A3_contact":
-            worst = max((r["dev_rel"] for r in rows), default=0.0)
-            print(f"A3 contact theorem: worst relative deviation {worst:.2%}")
+    # An empty acceptance table used to print "worst relative deviation 0.00%",
+    # which reads as a pass and means the test did not run.
+    for name, label in (("A1_b2", "A1 second virial"),
+                        ("A3_contact", "A3 contact theorem")):
+        rows = man["acceptance"][name]
+        if not rows:
+            print(f"{label}: NOT RUN — no rows (too few usable ladder points, "
+                  f"or no confined state to check)")
+            continue
+        worst = max(rows, key=lambda r: r["dev_rel"])
+        sig = worst.get("dev_sigma", float("nan"))
+        extra = (f", {sig:.1f} sigma" if sig == sig else
+                 ", no error bar on this row")
+        print(f"{label}: worst relative deviation {worst['dev_rel']:.2%} "
+              f"(d={worst['d']} p={worst['p']}{extra})")
     return 0
 
 
