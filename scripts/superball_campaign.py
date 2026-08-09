@@ -1380,6 +1380,8 @@ def write_manifest(bulk, mc, excluded, etamax):
     A("## Files\n")
     A("| file | contents |")
     A("|---|---|")
+    A("| `README.md` | the data card: schema, conventions, weighting rules. "
+      "Downstream consumers start THERE. Maintained by hand, not regenerated |")
     A("| `bulk_eos.npy` | object array of bulk ladder dicts, with `z`, `rho` |")
     A("| `mc_states.npy` | object array of confined-state dicts, with profiles |")
     A("| `excluded.npy` | states the freezing guard refused, with reasons |")
