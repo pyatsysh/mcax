@@ -285,7 +285,26 @@ def v4_free_cubes(quick):
     beta mu_ex -> 2 B2 rho, which involves the whole sampler. The second is
     qualitative but sharp: free cubes must be LESS dense than parallel ones at
     the same activity, because rotation enlarges the excluded volume.
+
+    **Both engines are PREFILLED, and the rotating one starts aligned.** As
+    first written this rung started both boxes empty, which is the exact
+    mistake V1 already taught: at a fixed step count two engines with
+    different move mixes are compared on their filling rates, not their
+    equilibria (the orientable engine proposes insertions 20% of steps, the
+    aligned one 25%). It went unnoticed because the first version of V4 never
+    completed a full run. The prefill must be aligned for the free
+    runs too: a Haar-oriented cube on a 1.05 sigma lattice reaches 1.73 sigma
+    and seats real overlaps — see `orient.burn_and_sample` — so the burn is
+    what randomises the orientations, and `audit_overlaps` on the final state
+    is the proof none survived anywhere.
+
+    Every row also carries the translational monitor S(k)max/<N> next to the
+    cubatic one: free cubes near freezing order translationally into a
+    vacancy-rich simple cubic while a rotator phase would do the reverse, so
+    the pair of monitors is the guardrail the task brief asks for and neither
+    implies the other.
     """
+    from mcax import order
     C = 8 if quick else 16
     nb, nr = (8_000, 24_000) if quick else (20_000, 60_000)
     rows = []
@@ -293,24 +312,32 @@ def v4_free_cubes(quick):
     for z in (0.15, 0.3, 0.6):
         os_ = orient.make_spec(H=6.0, Lperp=6.0, z_act=z, body=b, geom="bulk",
                                dtheta=0.5)
+        n0 = prefill(os_, b)
+        kv = order.kvectors(os_, nmax=4, kmax=4.0 * onp.pi)
         ro = orient.burn_and_sample(os_, C=C, seed=21, n_burn=nb, n_run=nr,
-                                    thin=50, nbins=16)
+                                    thin=50, nbins=16, n0=n0, aligned=True,
+                                    kvecs=kv)
         ps = make_spec(d=3, H=6.0, Lperp=6.0, z_act=z, geom="bulk",
                        shape=shapes.Superball(INF), Nmax=os_.Nmax)
         rp = burn_and_sample(ps, C=C, seed=21, n_burn=nb, n_run=nr, thin=50,
-                             nbins=16)
+                             nbins=16, n0=n0)
         vol = geometry.volume(os_)
         rho = ro.n_mean / vol
+        od = order.summarise(ro, kv)
+        bad = orient.audit_overlaps(os_, ro.state)
         rows.append(dict(
             z=z, rho_free=rho, eta_free=rho * 1.0,
             rho_parallel=rp.n_mean / vol,
             b2_implied=float((onp.log(z) - onp.log(rho)) / (2.0 * rho)),
             n_err=chain_err(ro.Ns), rot_acceptance=float(ro.acc[1]),
-            cubatic=[float(x) for x in orient.cubatic(ro.state)]))
+            cubatic=[float(x) for x in orient.cubatic(ro.state)],
+            s_max_over_n=od["s_max_over_n"], ordered=bool(od["ordered"]),
+            overlaps_final=int(bad)))
         print(f"  V4 z={z}: free cubes eta={rho:.4f} vs parallel "
               f"{rp.n_mean / vol:.4f}; B2 implied by the dilute limit "
               f"{rows[-1]['b2_implied']:.3f} (exact 5.5); "
-              f"rot acc {100 * ro.acc[1]:.1f}%")
+              f"rot acc {100 * ro.acc[1]:.1f}%; S/N {od['s_max_over_n']:.4f}; "
+              f"final overlaps {bad}")
     return rows
 
 

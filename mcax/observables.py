@@ -62,17 +62,54 @@ def _chain_mean_and_error(per_chain):
     return m, float(v.std(ddof = 1) / onp.sqrt(v.size))
 
 
+def _var_plus(a):
+    """Stan's var+: within-chain variance rescaled, plus the variance of the
+    chain means. Unbiased for Var(N) to O(1/n) WHATEVER the autocorrelation.
+
+    The within-chain sample variance alone under-reads an autocorrelated
+    series by a factor of about (1 - 2 tau_sum / n): each chain measures
+    spread about its OWN mean, and a slowly wandering series stays near that
+    mean for tau draws at a time. At the autocorrelation this library itself
+    documents (N decorrelates over ~120 draws in dense 3-D, see `init_state`)
+    and a production window of 400 draws, that is a -32% bias at five times
+    the quoted error bar — and the error bar cannot see it, because every
+    chain shares it. What restores the missing spread is exactly the scatter
+    of the chain means, which is where a slow series parks the variance the
+    within term lost. Under a genuine convergence failure the sum errs LARGE,
+    which is the right direction for a number someone will trust: check
+    `split_rhat`, then read this.
+    """
+    m, n = a.shape
+    vp = a.var(axis = 1, ddof = 1).mean() * (n - 1) / n
+    if m > 1:
+        vp += a.mean(axis = 1).var(ddof = 1)
+    return float(vp)
+
+
+def _jackknife_chains(a, estimator):
+    """(value, standard error) of `estimator` by leave-one-chain-out.
+
+    The chain batch is the independence structure here, so deleting chains is
+    the resampling that respects it. Needed because var+ is a batch-level
+    estimator: there is no per-chain value whose scatter could serve instead.
+    """
+    m = a.shape[0]
+    full = estimator(a)
+    if m < 2:
+        return full, float("nan")
+    jk = onp.array([estimator(onp.delete(a, c, axis = 0)) for c in range(m)])
+    return full, float(onp.sqrt((m - 1) / m * onp.sum((jk - jk.mean()) ** 2)))
+
+
 def susceptibility(Ns):
     """d<N>/d(beta mu) = Var(N), with an error bar. `Ns` is `result.Ns`.
 
-    The variance is taken WITHIN each chain and then averaged, not pooled over
-    the whole batch. The two differ by exactly the between-chain scatter, which
-    is the numerator of R-hat: pooling would quietly fold a convergence failure
-    into the physics and report a too-large susceptibility for a batch that had
-    simply not met yet. Check `split_rhat` and read this second.
+    Estimated as var+ (see `_var_plus`) with a leave-one-chain-out error bar.
+    This replaced a within-chain-then-average variance, which is biased low
+    by tens of per cent at exactly the autocorrelation these runs have, with
+    an error bar blind to the bias because all chains share it.
     """
-    a = _as_chains(Ns)
-    return _chain_mean_and_error(a.var(axis = 1, ddof = 1))
+    return _jackknife_chains(_as_chains(Ns), _var_plus)
 
 
 def compressibility(Ns):
@@ -82,8 +119,8 @@ def compressibility(Ns):
     and good to about 0.1% for discs and spheres.
     """
     a = _as_chains(Ns)
-    per_chain = a.var(axis = 1, ddof = 1) / onp.maximum(a.mean(axis = 1), 1e-300)
-    return _chain_mean_and_error(per_chain)
+    return _jackknife_chains(
+        a, lambda x: _var_plus(x) / max(float(x.mean()), 1e-300))
 
 
 def response_profile(spec, result):
@@ -96,12 +133,20 @@ def response_profile(spec, result):
     `tests/test_observables.py` asserts and which is the cheapest way to catch a
     normalisation slip.
     """
+    from . import geometry
     h = onp.asarray(result.hist, dtype = float)             # (C, nbins)
     hn = onp.asarray(result.hist_n, dtype = float)          # (C, nbins)
     n = _as_chains(result.Ns).mean(axis = 1)                # (C,)
     nsamples = result.nsamples
-    dz = spec.H / h.shape[-1]
-    cell = spec.Lperp ** (spec.d - 1) * dz                  # bin volume
+    # The geometry's OWN bin volumes and extent, not a slab of H/nbins: the
+    # histogram is binned along `profile_coord` over `extent`, which is the
+    # RADIUS in a sphere or a cylinder, and the bins there are shells growing
+    # like r^{d-1}. The slab arithmetic this replaces predated the geometry
+    # split; it tilted every curved-pore response by exactly the factor the
+    # `density_profile` docstring warns "looks like a packing effect", and
+    # scaled the cylinder's axis by H where the coordinate runs to Lperp.
+    dz = geometry.extent(spec) / h.shape[-1]
+    cell = geometry.bin_volume(spec, h.shape[-1])           # (nbins,) exact
 
     cov = hn / nsamples - (h / nsamples) * n[:, None]       # per chain
     chi = cov.mean(axis = 0) / cell

@@ -545,12 +545,23 @@ class OAccum(NamedTuple):
     Ns: np.ndarray         # (C, nchunks)
     s4: np.ndarray         # (C, nbins) sum of S4 over particles and draws
     s6: np.ndarray         # (C, nbins)
+    sk: np.ndarray         # (C, K) summed |rho_k|^2, empty unless kvecs given
 
 
 @partial(jax.jit, static_argnums = (0, 2, 3, 4))
-def run(spec, state, nsteps, thin, nbins):
-    """Advance every chain `nsteps`, accumulating at each thinning boundary."""
+def run(spec, state, nsteps, thin, nbins, kvecs = None):
+    """Advance every chain `nsteps`, accumulating at each thinning boundary.
+
+    `kvecs` switches on the translational ordering monitor, exactly as in
+    `mcax.core.run`: the free superball fluid near p = 2 freezes into a
+    ROTATOR phase — positions ordered, orientations still free — which the
+    cubatic monitor alone cannot see and this one can. `mcax.order` says a
+    monitor should be watched and not assumed; until this argument existed the
+    rotating engine had nothing to watch.
+    """
     require_float64()
+    from . import order
+    C = state.pos.shape[0]
 
     def chunk(carry, _):
         def inner(c, _):
@@ -560,16 +571,21 @@ def run(spec, state, nsteps, thin, nbins):
         hh = jax.vmap(lambda p, a: _hist_chain(spec, p, a, nbins))(pos, alive)
         s4, s6 = jax.vmap(lambda p, q, a: _cubic_chain(
             spec, p, q, a, nbins))(pos, quat, alive)
-        return st, (hh, np.sum(alive, axis = 1), s4, s6)
+        if kvecs is None:
+            s = np.zeros((C, 0))
+        else:
+            s = jax.vmap(lambda p, a: order.sk_chain(p, a, kvecs))(pos, alive)
+        return st, (hh, np.sum(alive, axis = 1), s4, s6, s)
 
     carry = (state.pos, state.quat, state.alive, state.key, state.acc,
              state.tot, state.nhi)
-    carry, (hists, Ns, s4, s6) = jax.lax.scan(chunk, carry, None,
-                                              length = nsteps // thin)
+    carry, (hists, Ns, s4, s6, sks) = jax.lax.scan(chunk, carry, None,
+                                                   length = nsteps // thin)
     return OState(*carry), OAccum(hist = np.sum(hists, axis = 0),
                                   Ns = np.swapaxes(Ns, 0, 1),
                                   s4 = np.sum(s4, axis = 0),
-                                  s6 = np.sum(s6, axis = 0))
+                                  s6 = np.sum(s6, axis = 0),
+                                  sk = np.sum(sks, axis = 0))
 
 
 class OResult(NamedTuple):
@@ -586,6 +602,7 @@ class OResult(NamedTuple):
     state: OState
     hist: onp.ndarray
     nsamples: int
+    sk: onp.ndarray = None  # (C, K) summed |rho_k|^2; `order.summarise` reads it
 
     @property
     def capacity_warning(self):
@@ -600,13 +617,24 @@ class OResult(NamedTuple):
 
 
 def burn_and_sample(spec, C, seed, n_burn, n_run, thin, nbins, n0 = 0,
-                    aligned = False):
+                    aligned = False, kvecs = None):
     """Burn in, then sample. The orientable counterpart of
-    `mcax.core.burn_and_sample`, with the same (chain, draw) output layout."""
+    `mcax.core.burn_and_sample`, with the same (chain, draw) output layout.
+
+    **Seed dense free-rotation runs with `aligned = True`.** The melt-in
+    lattice is overlap-free for aligned bodies at any pitch above sigma, but a
+    HAAR-oriented body on the same lattice can reach out to its circumdiameter
+    (1.73 sigma for cubes), so a random-orientation prefill can seat real
+    overlaps that the kernel never re-examines: moves only test the TRIAL
+    particle, so a seeded overlap between two bystanders persists until one of
+    them happens to move or die. An aligned start is a legal configuration for
+    every body here, and the burn randomises the orientations for free.
+    """
     st = init_state(spec, C, seed, n0 = n0, aligned = aligned)
     st, _ = run(spec, st, n_burn, max(n_burn // 4, 1), nbins)
     st = st._replace(acc = np.zeros_like(st.acc), tot = np.zeros_like(st.tot))
-    st, ac = run(spec, st, n_run, thin, nbins)
+    st, ac = run(spec, st, n_run, thin, nbins,
+                 kvecs = None if kvecs is None else np.asarray(kvecs))
     ns = n_run // thin
     hist = onp.asarray(ac.hist)
     dz = geometry.extent(spec) / nbins
@@ -628,7 +656,51 @@ def burn_and_sample(spec, C, seed, n_burn, n_run, thin, nbins, n0 = 0,
         acc = onp.asarray(st.acc).sum(0) / onp.maximum(
             onp.asarray(st.tot).sum(0), 1),
         n_mean = float(Ns.mean()), n_hi = n_hi, capacity = spec.Nmax,
-        saturation = n_hi / spec.Nmax, state = st, hist = hist, nsamples = ns)
+        saturation = n_hi / spec.Nmax, state = st, hist = hist, nsamples = ns,
+        sk = onp.asarray(ac.sk))
+
+
+def audit_overlaps(spec, state, n_iter = 1000):
+    """Count REAL overlapping pairs in a state, chain by chain. Host-side.
+
+    The invariant the engine guarantees is that no illegal configuration is
+    ever entered by a MOVE; it says nothing about the configuration the chain
+    was handed. A random-orientation prefill can seat overlaps (see
+    `burn_and_sample`), and nothing downstream would report them: the kernel
+    only tests trial particles, so a bystander overlap persists silently until
+    one member moves or is deleted. This audit is the missing measurement —
+    call it on `result.state` and the answer should be zero.
+
+    Pairs further apart than twice the circumradius cannot overlap and are
+    skipped; the rest get the certificate search at `n_iter`, the same
+    high-budget standard V3 uses as its reference (exact for spheres and
+    cubes; for finite p a fail-to-separate at this budget is the strongest
+    claim the engine can make about its own state).
+    """
+    pos = onp.asarray(state.pos)
+    quat = onp.asarray(state.quat)
+    alive = onp.asarray(state.alive)
+    r_out = bodies.circumradius(spec.body, 3)
+    total = 0
+    for c in range(pos.shape[0]):
+        p, q = pos[c][alive[c]], quat[c][alive[c]]
+        n = len(p)
+        if n < 2:
+            continue
+        dr = p[None, :, :] - p[:, None, :]
+        dr = onp.asarray(geometry.min_image(spec, np.asarray(dr)))
+        d2 = onp.sum(dr * dr, axis = -1)
+        iu, ju = onp.triu_indices(n, k = 1)
+        cand = d2[iu, ju] <= (2.0 * r_out) ** 2
+        if not cand.any():
+            continue
+        i, j = iu[cand], ju[cand]
+        Ra = q_matrix(np.asarray(q[i]))
+        Rb = q_matrix(np.asarray(q[j]))
+        hit = jax.vmap(lambda v, A, B: overlaps_pair(
+            spec.body, v, A, B, n_iter, spec.tol))(np.asarray(dr[i, j]), Ra, Rb)
+        total += int(onp.asarray(hit).sum())
+    return total
 
 
 # --------------------------------------------------------------------------- #
