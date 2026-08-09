@@ -143,6 +143,18 @@ STALL_CHI = 0.005
 # jump to between +14% and +44%. See `usable_ladder`.
 LADDER_EXCESS = 0.10
 
+# ...and an absolute floor on the same residual, because a purely relative
+# band is a few-hundredths tolerance at the DILUTE end, where mu_ex is small,
+# the three fit points sit in the other (larger) box, and the prediction is a
+# noisy quadratic extrapolated to double its range. Measured on the 2026-08-07
+# ladders: the three genuine stalls fired at residuals +1.07 to +1.78 against
+# predictions of 7 to 8, while a fully healthy d3 p2.5 rung at eta = 0.08 was
+# cut on a residual of +0.098 against 0.652 — which then truncated the ladder
+# to three dilute rungs and silently cost that shape its whole confined row.
+# A stall cannot exist where insertions accept freely, so nothing real lives
+# below this floor.
+LADDER_EXCESS_ABS = 0.5
+
 DZ = 0.05                  # profile bin width, as in the hard-sphere campaign
 LPERP = 8.0
 
@@ -578,7 +590,7 @@ def usable_ladder(bulk, d, pexp):
             mux = onp.array([q["mu"] for q in out[-3:]]) - onp.log(rho)
             pred = onp.polyval(onp.polyfit(rho, mux, 2), r["rho_mean"])
             got = r["mu"] - onp.log(max(r["rho_mean"], 1e-300))
-            if got - pred > LADDER_EXCESS * abs(pred):
+            if got - pred > max(LADDER_EXCESS * abs(pred), LADDER_EXCESS_ABS):
                 break
         out.append(r)
     out.sort(key=lambda r: r["rho_mean"])

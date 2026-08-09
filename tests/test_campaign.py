@@ -154,6 +154,31 @@ def test_burn_in_grows_with_the_system_rather_than_shrinking_per_particle():
     assert camp.burn_for(1.0) == camp.NBURN         # floor for tiny cavities
 
 
+def test_the_stall_cut_has_an_absolute_floor_at_the_dilute_end():
+    """A purely relative excess band is a few hundredths of beta mu at the
+    dilute end, where mu_ex is small and the prediction is an extrapolated
+    quadratic through the other box's rungs. Measured on real ladders: true
+    stalls fire at residuals +1.1 to +1.8, and a healthy d3 p2.5 rung was cut
+    at +0.098 — costing that shape its entire confined row. The floor must
+    swallow the latter and not the former."""
+    # the measured false positive, reconstructed: a dilute rung whose mu_ex
+    # sits 0.098 above a small prediction. The old relative-only band cut it
+    # (0.098 > 0.10 x ~0.7) and the ladder died at eta = 0.04; the floor
+    # keeps it. Perturbing the TOP rung isolates the floor: a wobbled rung
+    # kept mid-ladder corrupts the fit windows above it, and rungs cut off a
+    # corrupted window are the guard working, not the bug.
+    rows = synthetic_ladder(3, [0.01, 0.02, 0.04, 0.08])
+    rows[-1]["mu"] += 0.098
+    kept = [r["eta_mean"] for r in camp.usable_ladder(rows, 3, 2.0)]
+    assert max(kept) == pytest.approx(0.08), \
+        f"dilute wobble cut the ladder at {max(kept)}"
+    # a genuine stall signature: residual of order one, cut as before
+    rows = synthetic_ladder(3, ETAS_3D)
+    rows[-1]["mu"] += 1.5
+    kept = [r["eta_mean"] for r in camp.usable_ladder(rows, 3, 2.0)]
+    assert max(kept) == pytest.approx(0.25)
+
+
 def test_mu_of_eta_does_not_sit_on_a_chord():
     """beta mu(eta) is convex, so a straight line between ladder rungs lies
     above the curve everywhere between them — the same bias `pressure_at` was
