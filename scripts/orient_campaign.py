@@ -39,7 +39,10 @@ os.makedirs(OUT, exist_ok=True)
 P_GRID = (3.0, 4.0)
 C = 16
 N_BURN, N_RUN, THIN = 30_000, 90_000, 50
-Z_LADDER = onp.geomspace(0.05, 12.0, 9)
+Z_LADDER = list(onp.geomspace(0.05, 12.0, 9)) + [22.0, 40.0]
+# the two appended rungs (2026-08-08): the geomspace top lands at
+# eta ~ 0.245, just under the 0.25 slit targets; appending preserves the
+# tags of every completed rung so the resume logic re-runs nothing
 SLITS = ((5.0, 0.15), (5.0, 0.25), (8.0, 0.15), (8.0, 0.25))
 ETA_CAP = 0.38            # conservative: free bodies order earlier
 S4_TRIP = 0.12            # cubatic monitor threshold
