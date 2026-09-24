@@ -37,9 +37,10 @@ two stages:
    toward the support point by an exact line search along the segment. One
    fixed-length `lax.scan`, no branches, no simplex bookkeeping.
 
-Both stages are wrapped in the cheap tiers the task brief specifies: centres
-closer than twice the inradius certainly overlap, further than twice the
-circumradius certainly do not, and only the shell between reaches the search.
+Both stages are wrapped in two cheap tiers, the design's first requirement:
+centres closer than twice the inradius certainly overlap, further than twice
+the circumradius certainly do not, and only the shell between reaches the
+search.
 
 ## The guarantee direction
 
@@ -92,8 +93,8 @@ the smooth interior of the family.
 
 ## Why 1e-6 is not reachable this way, and what would be
 
-The task brief asks for a trip rate below 1e-6. That is not achieved and,
-by this route, cannot be. The reason is structural rather than a matter of
+The design target was a trip rate below 1e-6. That is not achieved and, by
+this route, cannot be. The reason is structural rather than a matter of
 tuning:
 
 Frank–Wolfe converges as $O(D/k)$ in the distance to the closest point of $M$.

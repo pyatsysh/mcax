@@ -299,14 +299,14 @@ res.z, res.rho                             # the density profile</code></pre>
     32 chains and two million steps to clear the gate honestly, which is ten
     times the cost of the other three and worth paying.</p>
 
-    <p>Alongside the statistics, 102 fast tests pin the invariants that catch
+    <p>Alongside the statistics, 428 fast tests pin the invariants that catch
     sampler bugs rather than confirm sampler statistics. No two live centres
     closer than one diameter, verified with a separate NumPy implementation of
     the boundary conventions so a geometry error cannot hide behind itself. The
     ideal-gas limit at vanishing core size, which tests the acceptances with the
     overlap test removed from the picture entirely. Accepted insertions
     balancing accepted deletions at equilibrium. Bit-exact reproduction from a
-    seed. They run in 103 seconds on a laptop CPU.</p>
+    seed. They run in minutes on a CPU, one process per test file.</p>
   </div>
 
   <div class="card" id="limits">
@@ -341,7 +341,7 @@ res.z, res.rho                             # the density profile</code></pre>
       single-chain C code beats it. The win is in the batch and in living inside
       JAX, and pretending otherwise would only disappoint the people who need
       HPMC.</li>
-      <li><b>Single-component.</b> No mixtures and no aspherical shapes. External fields and attractive pair tails are supported; a second species is not.</li>
+      <li><b>Single-component.</b> No mixtures. External fields, attractive pair tails, aligned superballs and freely rotating convex bodies (<code>mcax.shapes</code>, <code>mcax.orient</code>) are supported; a second species is not.</li>
     </ul>
   </div>
 

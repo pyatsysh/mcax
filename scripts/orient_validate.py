@@ -33,8 +33,7 @@ independently derived, orientation-resolved prediction, and reproducing it
 tests the rotational machinery and the overlap test together.
 
 Run (CPU is enough for everything but V4's production run):
-    LEASE_SKIP=1 JAX_PLATFORMS=cpu taskset -c 2-3 <python> \
-        scripts/orient_validate.py [--quick]
+    JAX_PLATFORMS=cpu <python> scripts/orient_validate.py [--quick]
 """
 import argparse
 import json
@@ -301,7 +300,7 @@ def v4_free_cubes(quick):
     Every row also carries the translational monitor S(k)max/<N> next to the
     cubatic one: free cubes near freezing order translationally into a
     vacancy-rich simple cubic while a rotator phase would do the reverse, so
-    the pair of monitors is the guardrail the task brief asks for and neither
+    the pair of monitors is the guardrail the design asks for and neither
     implies the other.
     """
     from mcax import order

@@ -1,9 +1,10 @@
 # mcax
 
-Batched hard-particle **grand-canonical Monte Carlo in JAX**: hard rods, discs
-and spheres in bulk, slit, spherical, cylindrical and wedge confinement, with
-optional external fields and attractive pair tails, many independent chains
-advanced in lockstep on one device, everything jit and scan compiled.
+Batched hard-particle **grand-canonical Monte Carlo in JAX**: hard rods, discs,
+spheres and superballs in bulk, slit, box, spherical, cylindrical and wedge
+confinement, with optional external fields and attractive pair tails, many
+independent chains advanced in lockstep on one device, everything jit and scan
+compiled.
 
 Documentation and the longer argument: **https://pyatsysh.github.io/mcax/**
 
@@ -90,12 +91,13 @@ diagnostics, and the final `state` so a run can be continued.
 
 ### Geometry and conventions
 
-Five confinements, selected with `geom`:
+Six confinements, selected with `geom`:
 
 | `geom` | what it is | `H` | `Lperp` |
 |---|---|---|---|
 | `bulk` | periodic everywhere | box edge | transverse edge |
 | `slit` | hard walls on centres at 0 and `H` | wall separation | transverse edge |
+| `box` | `slit` with the transverse periodicity taken away: hard on every face | wall separation | transverse edge, hard |
 | `sphere` | spherical pore, `d = 1, 2, 3` | **radius** | . |
 | `cylinder` | cylindrical pore, `d >= 2` | axial period | **radius** |
 | `wedge` | two walls meeting at `psi`, `d >= 2` | height above the apex | periodic edge |
@@ -147,6 +149,63 @@ does not cross it: it sticks in one phase and reports a converged-looking mean
 that is wrong. Split R-hat does not reliably catch this either, because every
 chain can stick in the same phase. There is no reweighting or umbrella sampling
 here. Stay supercritical or dilute, and watch the `N` histogram.
+
+### Shapes
+
+The hard core need not be a sphere. `mcax.shapes` generalises it to an
+**aligned superball** of exponent `p`, the body
+`|x|^p + |y|^p + |z|^p <= (sigma/2)^p`: a cross-polytope at `p = 1`, the sphere
+at `p = 2`, a cube as `p -> infinity`. Two aligned superballs overlap exactly
+when their centre separation lies in the body scaled by two, so the overlap
+test is the `p`-norm against `sigma` where the sphere's is the Euclidean norm,
+and nothing else in the sampler changes: at `p = 2` the arithmetic is the
+hard-sphere engine's to the bit. Particles do not rotate. That is the parallel
+hard-body model rather than a shortcut, and the parallel hard cube fluid is its
+`p -> infinity` member.
+
+```python
+from mcax import shapes
+
+spec = make_spec(d = 3, H = 8.0, z_act = ..., shape = shapes.CUBE)            # parallel cubes
+spec = make_spec(d = 3, H = 8.0, z_act = ..., shape = shapes.Superball(4.0))  # a rounded cube
+```
+
+`p >= 1` is enforced, because the one-line overlap test rests on convexity,
+and a pair tail with a non-spherical core raises: the tails vanish inside
+`r = sigma` and a non-spherical core admits legal pairs closer than that. In
+`d = 1` every `p` is the same Tonks gas, which the tests use as the razor for
+the shape layer.
+
+`mcax.orient` is a second engine for bodies that **rotate**. Each particle
+carries a unit quaternion, the moves gain a rotation, and insertion draws its
+orientation from the Haar measure. Two rotated superballs have no closed-form
+contact condition, so the overlap test is a search for a separating direction:
+a certificate that is exact when found, and if a fixed budget finds none the
+pair is declared overlapping. That is the one approximate answer in the
+library and it fails only in the safe direction, so the sampler is exact for a
+body fattened by about `5e-4 sigma`. The measured trip rate, and why `1e-6` is
+not reachable this way, are in
+[docs/orientable-overlap.md](docs/orientable-overlap.md);
+`orient.audit_overlaps` counts real overlaps in a final state, and the answer
+should be zero.
+
+```python
+from mcax import bodies, orient
+
+ospec = orient.make_spec(H = 8.0, Lperp = 8.0, z_act = ..., geom = "slit",
+                         body = bodies.Superball(4.0), dtheta = 0.35)
+res = orient.burn_and_sample(ospec, C = 32, seed = 0, n_burn = 50_000,
+                             n_run = 200_000, thin = 100, nbins = 80,
+                             aligned = True)
+res.s4                     # cubatic order about the wall normal, per bin
+```
+
+`bodies.Superball(p, R)` is the rotatable body and `shapes.Superball(p)` the
+aligned core. They are different classes with different constructors, and
+`from mcax import Superball` gives the aligned one. With `dtheta = 0` from an
+aligned start the rotating engine samples the parallel model through a
+different overlap test, and the two engines, sharing no overlap code, certify
+each other.
 
 ### The zero-dimensional limit
 
@@ -310,8 +369,9 @@ the target occupancy on a lattice and melting it in the burn removes the
 transient, which is what `lattice_fill` is for.
 
 ```bash
-pytest                        # 102 fast tests, 103 s on CPU
-pytest -m slow                # full EOS validation, minutes per case
+pytest                        # the fast tier: 428 tests, minutes on a CPU
+scripts/run_tests.sh -m "not slow"      # the same, one process per file (what CI runs)
+pytest -m slow                # full EOS validation, 17 cases, minutes per case
 python scripts/validate.py --dims 1     # watch the exact cases run
 python examples/wall_profile.py         # the figure above
 ```
@@ -355,7 +415,8 @@ is the least-converged number in the table, and its R-hat of 1.016 says so.
 The rest of the `slow` tier is not tabulated: the compressibility identities in
 all three dimensions, S(0) by both routes, the local response integrating back
 to Var(N), a disc pore recovering bulk in its middle, and the bin-averaged
-barometric law. All 17 cases pass (`pytest -m slow`, 74 minutes on CPU).
+barometric law. All 17 cases pass (`pytest -m slow`, 74 minutes on CPU at the
+last full run).
 
 ## Diagnostics
 
@@ -416,8 +477,9 @@ answer. It is exact, not a fallback: see [Response functions](#response-function
 - **No phase coexistence.** With an attraction switched on the muVT distribution
   of `N` is bimodal below `T_c` and this sampler will not cross the barrier. No
   reweighting, no umbrella sampling, no finite-size scaling.
-- **Single-component.** No mixtures and no aspherical shapes. External fields and
-  attractive pair tails are supported; a second species is not.
+- **Single-component.** No mixtures. External fields, attractive pair tails,
+  aligned superballs and freely rotating convex bodies are supported; a second
+  species is not.
 
 ## Licence
 
