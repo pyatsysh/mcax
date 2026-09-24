@@ -1,14 +1,17 @@
 """The superball campaign's analysis layer, on synthetic ladders.
 
-`scripts/superball_campaign.py` is where the measured numbers become the numbers
-a functional is trained on, and until now none of it was tested: the sampler had
-a hundred tests and the arithmetic that reads it had none. That is the wrong way
-round, because a sampler defect shows up against Tonks or Carnahan-Starling and
-an analysis defect shows up as a plausible table.
+`mcax.campaign` is where the measured numbers become the numbers a functional
+is trained on, and for a while none of it was tested: the sampler had a hundred
+tests and the arithmetic that reads it had none. That is the wrong way round,
+because a sampler defect shows up against Tonks or Carnahan-Starling and an
+analysis defect shows up as a plausible table.
 
 Everything here runs on a ladder BUILT from the exact equations of state rather
 than measured, so the right answer is known to the last digit and any deviation
-is the analysis. No sampling, no JAX, milliseconds.
+is the analysis. No sampling, no JAX, milliseconds. The campaign driver
+`scripts/superball_campaign.py` imports the accessors back from the package and
+re-exports them, which is the path `dimint-dft` reads them through, so the
+tests at the end are about the script rather than the analysis.
 """
 import os
 import sys
@@ -19,7 +22,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "scripts"))
 
-from mcax import eos, shapes                                    # noqa: E402
+from mcax import campaign, eos, shapes                          # noqa: E402
 import superball_campaign as camp                               # noqa: E402
 
 
@@ -55,12 +58,12 @@ def test_pressure_at_beats_a_chord_on_the_convex_pressure():
     rho_q = 0.15 / eos.B[3]                       # between the 0.12 and 0.18 rungs
     exact = float(eos.p_of_rho(3, rho_q))
 
-    got = camp.pressure_at(bulk, 3, 2.0, rho_q)
+    got = campaign.pressure_at(bulk, 3, 2.0, rho_q)
     assert abs(got - exact) / exact < 0.01
 
     # ... and the chord it replaced is several times worse, which is the whole
     # reason for the change and so is asserted rather than described.
-    node_rho, node_P = camp.pressure_curve(bulk, 3, 2.0)
+    node_rho, node_P = campaign.pressure_curve(bulk, 3, 2.0)
     chord = float(onp.interp(rho_q, node_rho, node_P))
     assert abs(chord - exact) / exact > 3.0 * abs(got - exact) / exact
 
@@ -74,7 +77,7 @@ def test_the_gibbs_duhem_integration_reproduces_the_reference(d, etas):
     it was integrated from, at every node. Anything else is the quadrature or
     the virial anchor below the first point."""
     bulk = synthetic_ladder(d, etas)
-    rho, P = camp.pressure_curve(bulk, d, 2.0)
+    rho, P = campaign.pressure_curve(bulk, d, 2.0)
     dev = onp.abs(P - eos.p_of_rho(d, rho)) / eos.p_of_rho(d, rho)
     assert dev.max() < 0.01
 
@@ -93,7 +96,7 @@ def test_a_stalled_ladder_point_is_dropped_and_a_dense_one_is_not():
     cut on density alone would have to lose the real one too.
     """
     bulk = synthetic_ladder(3, ETAS_3D + [0.40])
-    assert len(camp.usable_ladder(bulk, 3, 2.0)) == len(ETAS_3D) + 1
+    assert len(campaign.usable_ladder(bulk, 3, 2.0)) == len(ETAS_3D) + 1
 
     stalled = dict(bulk[-1])
     stalled["mu"] = float(eos.mu_of_rho(3, 0.46 / eos.B[3]))
@@ -101,7 +104,7 @@ def test_a_stalled_ladder_point_is_dropped_and_a_dense_one_is_not():
     stalled["eta_mean"] = stalled["rho_mean"] * eos.B[3]
     stalled["drift_sigma"] = 0.1                  # ... and looks beautifully still
 
-    kept = camp.usable_ladder(bulk + [stalled], 3, 2.0)
+    kept = campaign.usable_ladder(bulk + [stalled], 3, 2.0)
     assert len(kept) == len(ETAS_3D) + 1
     assert max(r["mu"] for r in kept) == pytest.approx(bulk[-1]["mu"])
 
@@ -122,8 +125,8 @@ def test_the_forward_prediction_catches_a_stall_the_compressibility_floor_misses
     short["drift_sigma"] = 0.1
     a = short["mu"] - onp.log(short["rho_mean"])
     b = onp.log(short["rho_mean"]) - onp.log(bulk[-1]["rho_mean"])
-    assert b / (short["mu"] - bulk[-1]["mu"]) > camp.STALL_CHI   # floor passes it
-    assert len(camp.usable_ladder(bulk + [short], 3, 2.0)) == len(ETAS_3D) + 1
+    assert b / (short["mu"] - bulk[-1]["mu"]) > campaign.STALL_CHI   # floor passes it
+    assert len(campaign.usable_ladder(bulk + [short], 3, 2.0)) == len(ETAS_3D) + 1
 
 
 def test_mu_of_eta_refuses_to_invent_activities_above_the_usable_ladder():
@@ -136,7 +139,7 @@ def test_mu_of_eta_refuses_to_invent_activities_above_the_usable_ladder():
     stalled["mu"] = float(eos.mu_of_rho(3, 0.46 / eos.B[3]))
     stalled["rho_mean"] *= 1.004
     stalled["eta_mean"] = stalled["rho_mean"] * eos.B[3]
-    f = camp.mu_of_eta(bulk + [stalled], 3, 2.0)
+    f = campaign.mu_of_eta(bulk + [stalled], 3, 2.0)
     assert f(0.30) == pytest.approx(eos.mu_of_rho(3, 0.30 / eos.B[3]), rel=0.02)
     with pytest.raises(ValueError):
         f(0.42)
@@ -169,13 +172,13 @@ def test_the_stall_cut_has_an_absolute_floor_at_the_dilute_end():
     # corrupted window are the guard working, not the bug.
     rows = synthetic_ladder(3, [0.01, 0.02, 0.04, 0.08])
     rows[-1]["mu"] += 0.098
-    kept = [r["eta_mean"] for r in camp.usable_ladder(rows, 3, 2.0)]
+    kept = [r["eta_mean"] for r in campaign.usable_ladder(rows, 3, 2.0)]
     assert max(kept) == pytest.approx(0.08), \
         f"dilute wobble cut the ladder at {max(kept)}"
     # a genuine stall signature: residual of order one, cut as before
     rows = synthetic_ladder(3, ETAS_3D)
     rows[-1]["mu"] += 1.5
-    kept = [r["eta_mean"] for r in camp.usable_ladder(rows, 3, 2.0)]
+    kept = [r["eta_mean"] for r in campaign.usable_ladder(rows, 3, 2.0)]
     assert max(kept) == pytest.approx(0.25)
 
 
@@ -188,7 +191,7 @@ def test_mu_of_eta_does_not_sit_on_a_chord():
     and maximal mid-gap. The quadratic-on-mu_ex route must beat it by an
     order of magnitude at every off-rung target the campaign uses."""
     rows = synthetic_ladder(3, ETAS_3D)
-    f = camp.mu_of_eta(rows, 3, 2.0)
+    f = campaign.mu_of_eta(rows, 3, 2.0)
     for eta in (0.15, 0.20, 0.30):                    # all between rungs
         exact = float(eos.mu_of_rho(3, eta / eos.B[3]))
         e = onp.array([r["eta_mean"] for r in rows])
@@ -237,3 +240,50 @@ def test_b2_is_the_exact_one_for_every_shape_in_the_grid():
             b = shapes.b2(shapes.Superball(p), d, 1.0)
             assert b == pytest.approx(2.0 ** (d - 1)
                                       * shapes.volume(shapes.Superball(p), d))
+
+
+# --------------------------------------------------------------------------- #
+#  The script, and the path dimint reads the accessors through                 #
+# --------------------------------------------------------------------------- #
+
+def test_the_script_re_exports_the_package_accessors():
+    """`dimint-dft` reaches the accessors through the campaign script, so the
+    names it imports there have to be the package's own objects and not a
+    second copy that could drift."""
+    for name in ("pressure_at", "mu_of_eta", "usable_ladder", "pressure_curve",
+                 "pname", "DRIFT_TOL"):
+        assert getattr(camp, name) is getattr(campaign, name), name
+
+
+def test_a_ladder_row_missing_a_key_is_refused_by_name():
+    """A schema drift in the rows has to fail where it can be read, naming the
+    rung and the key, and not as a KeyError out of a polynomial fit after the
+    rows have been sorted and filtered."""
+    rows = synthetic_ladder(3, ETAS_3D)
+    rows[3]["tag"] = "d3_bulk_p2_eta0.08"
+    del rows[3]["drift_sigma"]
+    with pytest.raises(KeyError, match="d3_bulk_p2_eta0.08.*drift_sigma"):
+        campaign.usable_ladder(rows, 3, 2.0)
+    # and every accessor sits on the same check
+    with pytest.raises(KeyError):
+        campaign.pressure_at(rows, 3, 2.0, 0.2)
+    with pytest.raises(KeyError):
+        campaign.mu_of_eta(rows, 3, 2.0)
+
+
+def test_pressure_at_refuses_to_read_off_the_end_of_the_ladder():
+    """`onp.interp` clamps silently, so the refusal is explicit: a pressure
+    read off the end of the ladder is not a pressure at the density asked."""
+    bulk = synthetic_ladder(3, ETAS_3D)
+    top = max(r["rho_mean"] for r in bulk)
+    with pytest.raises(ValueError):
+        campaign.pressure_at(bulk, 3, 2.0, 1.01 * top)
+    assert campaign.pressure_at(bulk, 3, 2.0, 0.99 * top) > 0.0
+
+
+def test_pname_spells_the_cube_as_inf():
+    """State tags carry the exponent, and the benchmark shape must never be
+    confused with a member of the training grid."""
+    assert campaign.pname(float("inf")) == "inf"
+    assert campaign.pname(2.0) == "2"
+    assert campaign.pname(2.5) == "2.5"

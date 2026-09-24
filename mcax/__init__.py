@@ -20,6 +20,7 @@ from .observables import (susceptibility, compressibility, response_profile,
                           pair_correlation, structure_factor_zero)
 from .shapes import Superball, SPHERE, CUBE, OCTAHEDRON
 from . import bodies
+from . import campaign
 from . import eos
 from . import fields
 from . import geometry
