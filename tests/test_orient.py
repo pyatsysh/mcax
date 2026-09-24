@@ -152,6 +152,55 @@ def test_the_budget_only_ever_errs_towards_overlap(p):
     assert (prod & ~ref).sum() / max((~ref).sum(), 1) < 0.02
 
 
+# The trip rate at the production budget, per hard test, as the table in
+# `docs/orientable-overlap.md` gives it. Exactly zero at the two ends for
+# structural reasons: a sphere's cheap tiers decide every pair, and a cube's
+# candidate axes are complete.
+DOCUMENTED_TRIP_RATE = {2.0: 0.0, 3.0: 1.8e-3, 4.0: 3.2e-3, 6.0: 5.7e-3,
+                        INF: 0.0}
+
+
+@pytest.mark.parametrize("p", PS)
+def test_the_budget_trip_rate_stays_below_the_documented_number(p):
+    """The number the documentation quotes is a guarantee only while something
+    holds it. Pairs are drawn uniformly in the shell the cheap tiers cannot
+    decide, with Haar orientations, and the trips at the production budget
+    are counted against the same search at n_iter = 1000, the reference the
+    table was measured against. The bound is the tabulated rate itself, on
+    twenty thousand pairs: the rates measured when this was written sit two
+    to three times below it, which is room for a change of random stream and
+    none for a change of algorithm. Spheres and cubes must trip exactly
+    never, for reasons that are structural rather than statistical.
+    """
+    b = Superball(p)
+    ri, rc = bodies.inradius(b, 3), bodies.circumradius(b, 3)
+    M = 20000
+    rng = onp.random.default_rng(11)
+    u = rng.normal(size=(M, 3))
+    u /= onp.linalg.norm(u, axis=1)[:, None]
+    dr = u * rng.uniform(2 * ri, 2 * rc, size=(M, 1))
+    ks = jax.random.split(jax.random.PRNGKey(12), 2 * M)
+    Q = jax.vmap(orient.q_random)(ks)
+    Ra, Rb = orient.q_matrix(Q[:M]), orient.q_matrix(Q[M:])
+    # the production budget and tolerance are whatever `make_spec` hands out
+    spec = orient.make_spec(H=6.0, Lperp=6.0, z_act=1.0, body=b)
+
+    def go(n_iter):
+        f = jax.jit(jax.vmap(lambda v, A, B: orient.overlaps_pair(
+            b, v, A, B, n_iter, spec.tol)))
+        return onp.asarray(f(np.asarray(dr), Ra, Rb))
+
+    ref, prod = go(1000), go(spec.n_iter)
+    assert not (ref & ~prod).any()
+    trips = int((prod & ~ref).sum())
+    if DOCUMENTED_TRIP_RATE[p] == 0.0:
+        assert trips == 0, f"p = {p}: {trips} trips where the test is exact"
+    else:
+        assert trips / M <= DOCUMENTED_TRIP_RATE[p], \
+            f"p = {p}: trip rate {trips / M:.2e} against a documented " \
+            f"{DOCUMENTED_TRIP_RATE[p]:.1e}"
+
+
 def test_a_cube_turned_forty_five_degrees_meets_corner_first():
     """A hand-computable rotated case, which the aligned predicate cannot
     reach at all. A unit cube turned 45 degrees about z reaches sqrt(2)/2 along

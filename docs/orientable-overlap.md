@@ -91,6 +91,15 @@ the smooth interior of the family.
 
 **The default budget is `n_iter = 32`.**
 
+`tests/test_orient.py::test_the_budget_trip_rate_stays_below_the_documented_number`
+holds this table: pairs drawn in the shell as above, the production budget
+against `n_iter = 1000`, exactly zero trips at $p = 2$ and $p = \infty$, and
+no more than the tabulated rate in between. Re-measured on 2026-09-06 over
+twenty thousand pairs the rates were 6.5e-4, 1.8e-3 and 2.9e-3 at
+$p = 3, 4, 6$, below the table, so the table stands as the ceiling. The fast
+tier runs the test, so a change to the search that moved these numbers fails
+before it ships.
+
 ## Why 1e-6 is not reachable this way, and what would be
 
 The design target was a trip rate below 1e-6. That is not achieved and, by

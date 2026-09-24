@@ -39,15 +39,17 @@ trip rate is reported in `docs/orientable-overlap.md`.
 
 **The search.** Two stages, both certificate-checked:
 
-  1. Fifteen candidate axes: the three face normals of each body in the lab
-     frame, and the nine cross products between them. This is the separating
-     axis theorem's candidate set, which is COMPLETE for cubes, so p = infinity
-     is exact at this stage and never reaches the second.
-  2. Frank-Wolfe on min ||x||^2 over M, started at x = c_B - c_A, which is
-     always a point of M. Each step takes u = -x/||x||, checks h_M(u) for a
-     certificate, and moves x towards the support point along that direction by
-     an exact line search. No simplex bookkeeping, no branches, one fixed-length
-     scan.
+  1. Thirty-two candidate axes: the three face normals of each body in the
+     lab frame, the nine cross products between them, the centre separation,
+     and the negative of each, since h_M(u) < 0 and h_M(-u) < 0 are different
+     certificates. This is the separating axis theorem's candidate set, which
+     is COMPLETE for cubes, so p = infinity is exact at this stage and never
+     reaches the second.
+  2. Frank-Wolfe on min ||x||^2 over M, started at the support point of M
+     along the most promising candidate axis, which is a point of M like any
+     other. Each step takes u = -x/||x||, checks h_M(u) for a certificate, and
+     moves x towards the support point along that direction by an exact line
+     search. No simplex bookkeeping, no branches, one fixed-length scan.
 
 **Central symmetry is load-bearing.** Every body in `mcax.bodies` satisfies
 K = -K, which is what collapses the Minkowski support map to
